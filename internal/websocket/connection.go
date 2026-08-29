@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,23 +26,24 @@ const (
 
 // Connection encapsulates a client's realtime WebSocket connection session
 type Connection struct {
-	sessionID          string
-	userID             string
-	ws                 *websocket.Conn
-	send               chan []byte
-	audioQueue         chan []byte
-	sttService         stt.Service
-	sttProvider        stt.STTProvider
-	llmService         llm.Service
-	contextManager     ctxpkg.Manager
-	sessionService     session.Service
-	maxAudioChunkBytes int
-	llmSemaphore       chan struct{} // limits concurrent in-flight LLM requests to prevent DoS
-	lastTranscriptSeq  int64
-	ctx                context.Context
-	cancel             context.CancelFunc
-	wg                 sync.WaitGroup
-	closeOnce          sync.Once
+	sessionID            string
+	userID               string
+	ws                   *websocket.Conn
+	send                 chan []byte
+	audioQueue           chan []byte
+	sttService           stt.Service
+	sttProvider          stt.STTProvider
+	llmService           llm.Service
+	contextManager       ctxpkg.Manager
+	sessionService       session.Service
+	maxAudioChunkBytes   int
+	llmSemaphore         chan struct{} // limits concurrent in-flight LLM requests to prevent DoS
+	lastTranscriptSeq    int64
+	consecutiveDropCount atomic.Int64
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	wg                   sync.WaitGroup
+	closeOnce            sync.Once
 }
 
 func NewConnection(
@@ -114,10 +116,17 @@ func (c *Connection) sendMessage(msg events.OutboundMessage) {
 
 	select {
 	case c.send <- data:
+		c.consecutiveDropCount.Store(0)
 	case <-c.ctx.Done():
 	default:
-		slog.Warn("Send buffer full, dropping message frame", "session_id", c.sessionID)
+		drops := c.consecutiveDropCount.Add(1)
+		slog.Warn("Send buffer full, dropping message frame", "session_id", c.sessionID, "consecutive_drops", drops)
 		metrics.Default.IncErrors()
+		// Disconnect slow or stalling clients to prevent server-side resource exhaustion
+		if drops > 100 {
+			slog.Error("Disconnecting unresponsive slow client exceeding drop threshold", "session_id", c.sessionID)
+			c.cancel()
+		}
 	}
 }
 
