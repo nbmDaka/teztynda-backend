@@ -68,24 +68,26 @@ func main() {
 		}
 	}
 
-	// 5. STT Provider Factory
+	// 5. STT Provider Factory & Service
 	sttFactory := func() stt.STTProvider {
 		if cfg.STTProvider == "deepgram" && cfg.DeepgramAPIKey != "" {
 			return stt.NewDeepgramProvider(cfg.DeepgramAPIKey)
 		}
 		return stt.NewFakeSTTProvider()
 	}
+	sttService := stt.NewService(sttFactory)
 
-	// 6. LLM Provider
+	// 6. LLM Provider & Service
 	var llmProvider llm.LLMProvider
 	if cfg.LLMProvider == "openai" && cfg.OpenAIAPIKey != "" {
 		llmProvider = llm.NewOpenAIProvider(cfg.OpenAIAPIKey, cfg.OpenAIModel)
 	} else {
 		llmProvider = llm.NewFakeLLMProvider(100 * time.Millisecond)
 	}
+	llmService := llm.NewService(llmProvider)
 
 	// 7. Context Management & Summarizer
-	summarizer := ctxpkg.NewSummarizer(llmProvider)
+	summarizer := ctxpkg.NewSummarizer(llmService)
 	contextManager := ctxpkg.NewManager(
 		redisClient,
 		summarizer,
@@ -94,12 +96,12 @@ func main() {
 		cfg.SessionTTL,
 	)
 
-	// 8. Session Repository & Service
+	// 8. Session Repository & Service (Pure session lifecycle / metadata)
 	sessionRepo := session.NewRepository(redisClient, pgDB, cfg.SessionTTL)
 	sessionService := session.NewService(sessionRepo)
 
 	// 9. WebSocket Handler & HTTP Router
-	wsHandler := websocket.NewHandler(sttFactory, llmProvider, contextManager, sessionService)
+	wsHandler := websocket.NewHandler(sttService, llmService, contextManager, sessionService)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws/realtime", wsHandler)
@@ -136,7 +138,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info("Shutting down server gracefully...")
+	log.Info("Shutting down API server gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -144,5 +146,5 @@ func main() {
 		log.Error("Server forced to shutdown", "error", err)
 	}
 
-	log.Info("Server stopped cleanly")
+	log.Info("API server stopped cleanly")
 }

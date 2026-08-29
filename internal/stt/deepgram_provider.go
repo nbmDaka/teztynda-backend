@@ -13,10 +13,10 @@ import (
 )
 
 type DeepgramResponse struct {
-	Type     string `json:"type"`
-	IsFinal  bool   `json:"is_final"`
-	SpeechFinal bool `json:"speech_final"`
-	Channel  struct {
+	Type        string `json:"type"`
+	IsFinal     bool   `json:"is_final"`
+	SpeechFinal bool   `json:"speech_final"`
+	Channel     struct {
 		Alternatives []struct {
 			Transcript string  `json:"transcript"`
 			Confidence float64 `json:"confidence"`
@@ -97,7 +97,7 @@ func (d *DeepgramProvider) readLoop() {
 						SessionID: d.sessionID,
 						Text:      transcript,
 						IsFinal:   isFinal,
-						Timestamp: time.Now().UTC(),
+						CreatedAt: time.Now().UTC(),
 					}
 
 					select {
@@ -122,7 +122,7 @@ func (d *DeepgramProvider) SendAudio(chunk []byte) error {
 	return d.conn.WriteMessage(websocket.BinaryMessage, chunk)
 }
 
-func (d *DeepgramProvider) ReceiveTranscript() <-chan events.TranscriptEvent {
+func (d *DeepgramProvider) TranscriptEvents() <-chan events.TranscriptEvent {
 	return d.transcriptChan
 }
 

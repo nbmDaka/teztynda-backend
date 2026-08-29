@@ -13,12 +13,12 @@ type Summarizer interface {
 }
 
 type summarizer struct {
-	llmProvider llm.LLMProvider
+	llmService llm.Service
 }
 
-func NewSummarizer(provider llm.LLMProvider) Summarizer {
+func NewSummarizer(llmService llm.Service) Summarizer {
 	return &summarizer{
-		llmProvider: provider,
+		llmService: llmService,
 	}
 }
 
@@ -32,29 +32,5 @@ func (s *summarizer) Summarize(ctx context.Context, existingSummary string, mess
 		sb.WriteString(fmt.Sprintf("%s: %s\n", strings.ToUpper(string(m.Role)), m.Content))
 	}
 
-	prompt := fmt.Sprintf(`You are an AI real-time conversation summarizer.
-
-Existing Summary:
-%s
-
-New conversation turns to incorporate:
-%s
-
-Task:
-Synthesize the existing summary and the new conversation turns into a unified, concise long-term summary. Preserve key facts, technical stack mentions, architectural decisions, and candidate achievements. Keep the summary under 200 words.`,
-		func() string {
-			if existingSummary == "" {
-				return "None (Conversation just started)"
-			}
-			return existingSummary
-		}(),
-		sb.String(),
-	)
-
-	newSummary, err := s.llmProvider.Generate(ctx, prompt)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate summary from LLM: %w", err)
-	}
-
-	return strings.TrimSpace(newSummary), nil
+	return s.llmService.GenerateSummary(ctx, existingSummary, sb.String())
 }

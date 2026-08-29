@@ -21,15 +21,15 @@ const (
 	TypeServerPong     = "pong"
 )
 
-// InboundMessage represents an incoming message from the client
+// InboundMessage represents an incoming message from the WebSocket client
 type InboundMessage struct {
 	Type   string          `json:"type"`
-	Data   string          `json:"data,omitempty"`   // base64 encoded audio
-	Prompt string          `json:"prompt,omitempty"` // optional prompt override
+	Data   string          `json:"data,omitempty"`   // base64 encoded audio chunk
+	Prompt string          `json:"prompt,omitempty"` // optional custom prompt
 	Raw    json.RawMessage `json:"-"`
 }
 
-// OutboundMessage represents a standardized outgoing message to the client
+// OutboundMessage represents a standardized outgoing frame to the WebSocket client
 type OutboundMessage struct {
 	Type      string      `json:"type"`
 	SessionID string      `json:"session_id,omitempty"`
@@ -40,13 +40,19 @@ type OutboundMessage struct {
 	Payload   interface{} `json:"payload,omitempty"`
 }
 
-// TranscriptEvent is emitted by the STT provider
+// TranscriptEvent is emitted by the STT provider and passed through the audio pipeline
 type TranscriptEvent struct {
 	SessionID string    `json:"session_id"`
 	Text      string    `json:"text"`
 	IsFinal   bool      `json:"is_final"`
-	Timestamp time.Time `json:"timestamp"`
+	CreatedAt time.Time `json:"created_at"`
 	Error     error     `json:"-"`
+}
+
+// SummarizationTask represents a background summarization job queued in Redis
+type SummarizationTask struct {
+	SessionID   string    `json:"session_id"`
+	TriggeredAt time.Time `json:"triggered_at"`
 }
 
 // NewTranscriptMessage creates an OutboundMessage for a transcript event
@@ -70,7 +76,7 @@ func NewAnswerMessage(sessionID, text string) OutboundMessage {
 	}
 }
 
-// NewErrorMessage creates an OutboundMessage for an error notification
+// NewErrorMessage creates an OutboundMessage for an error
 func NewErrorMessage(errStr string) OutboundMessage {
 	return OutboundMessage{
 		Type:      TypeError,

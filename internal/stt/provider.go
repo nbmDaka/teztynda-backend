@@ -14,8 +14,8 @@ type STTProvider interface {
 	// SendAudio streams raw PCM/encoded audio bytes to the STT provider
 	SendAudio(chunk []byte) error
 
-	// ReceiveTranscript returns a read-only channel of transcription events (both partial and final)
-	ReceiveTranscript() <-chan events.TranscriptEvent
+	// TranscriptEvents returns a read-only channel of transcription events (both partial and final)
+	TranscriptEvents() <-chan events.TranscriptEvent
 
 	// Close terminates the STT streaming session and cleans up resources
 	Close() error

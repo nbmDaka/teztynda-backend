@@ -18,7 +18,7 @@ func TestFakeSTTProvider_Streaming(t *testing.T) {
 	err := provider.StartSession(ctx, sessionID)
 	require.NoError(t, err)
 
-	ch := provider.ReceiveTranscript()
+	ch := provider.TranscriptEvents()
 
 	// Send dummy audio chunks
 	for i := 0; i < 6; i++ {

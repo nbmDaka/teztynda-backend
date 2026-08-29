@@ -2,7 +2,6 @@ package websocket_test
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,17 +20,20 @@ import (
 )
 
 func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
+	// 1. Setup Providers & Services
 	llmProv := llm.NewFakeLLMProvider(10 * time.Millisecond)
-	summarizer := ctxpkg.NewSummarizer(llmProv)
-	contextManager := ctxpkg.NewManager(nil, summarizer, 3000, 1000, time.Hour)
+	llmSvc := llm.NewService(llmProv)
+	summarizer := ctxpkg.NewSummarizer(llmSvc)
+	contextManager := ctxpkg.NewManager(nil, summarizer, 3000, 1200, time.Hour)
 	sessionRepo := session.NewRepository(nil, nil, time.Hour)
 	sessionService := session.NewService(sessionRepo)
 
 	sttFactory := func() stt.STTProvider {
 		return stt.NewFakeSTTProvider()
 	}
+	sttSvc := stt.NewService(sttFactory)
 
-	handler := wsPkg.NewHandler(sttFactory, llmProv, contextManager, sessionService)
+	handler := wsPkg.NewHandler(sttSvc, llmSvc, contextManager, sessionService)
 
 	server := httptest.NewServer(http.HandlerFunc(handler.ServeHTTP))
 	defer server.Close()
@@ -44,14 +46,14 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 	defer conn.Close()
 	assert.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
 
-	// 1. First message should be session_started
+	// 2. Receive session_started event
 	var msg1 events.OutboundMessage
 	err = conn.ReadJSON(&msg1)
 	require.NoError(t, err)
 	assert.Equal(t, events.TypeSessionStarted, msg1.Type)
 	assert.NotEmpty(t, msg1.SessionID)
 
-	// 2. Send audio chunks
+	// 3. Stream audio chunks
 	audioPayload := base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02, 0x03})
 	for i := 0; i < 4; i++ {
 		audioMsg := events.InboundMessage{
@@ -62,7 +64,7 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// 3. Read transcript message
+	// 4. Receive transcript event
 	var msg2 events.OutboundMessage
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	err = conn.ReadJSON(&msg2)
@@ -70,14 +72,14 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 	assert.Equal(t, events.TypeTranscript, msg2.Type)
 	assert.NotEmpty(t, msg2.Text)
 
-	// 4. Send generate_answer request
+	// 5. Send generate_answer command
 	genMsg := events.InboundMessage{
 		Type: events.TypeGenerateAnswer,
 	}
 	err = conn.WriteJSON(genMsg)
 	require.NoError(t, err)
 
-	// 5. Expect answer response
+	// 6. Receive answer event
 	var msg3 events.OutboundMessage
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))

@@ -23,21 +23,21 @@ var upgrader = websocket.Upgrader{
 }
 
 type Handler struct {
-	sttFactory     stt.ProviderFactory
-	llmProvider    llm.LLMProvider
+	sttService     stt.Service
+	llmService     llm.Service
 	contextManager ctxpkg.Manager
 	sessionService session.Service
 }
 
 func NewHandler(
-	sttFactory stt.ProviderFactory,
-	llmProvider llm.LLMProvider,
+	sttService stt.Service,
+	llmService llm.Service,
 	contextManager ctxpkg.Manager,
 	sessionService session.Service,
 ) *Handler {
 	return &Handler{
-		sttFactory:     sttFactory,
-		llmProvider:    llmProvider,
+		sttService:     sttService,
+		llmService:     llmService,
 		contextManager: contextManager,
 		sessionService: sessionService,
 	}
@@ -56,33 +56,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	// 1. Create Session
+	// 1. Session Manager: create session and track user metadata
 	sess, err := h.sessionService.CreateSession(ctx, userID)
 	if err != nil {
-		slog.Error("Failed to create session", "error", err)
+		slog.Error("Failed to initialize session", "error", err)
 		_ = ws.WriteJSON(map[string]string{"error": "failed to initialize session"})
 		_ = ws.Close()
 		return
 	}
 
-	slog.Info("New WebSocket connection established", "session_id", sess.ID, "user_id", sess.UserID)
+	slog.Info("New WebSocket connection accepted", "session_id", sess.ID, "user_id", sess.UserID)
 
-	// 2. Initialize STT Provider for this stream
-	sttProvider := h.sttFactory()
-	if err := sttProvider.StartSession(context.Background(), sess.ID); err != nil {
-		slog.Error("Failed to start STT provider session", "session_id", sess.ID, "error", err)
-		_ = ws.WriteJSON(map[string]string{"error": "failed to start stt session"})
+	// 2. Audio Pipeline: initialize STT provider directly through STT service
+	sttProvider, err := h.sttService.CreateProvider(context.Background(), sess.ID)
+	if err != nil {
+		slog.Error("Failed to start STT streaming session", "session_id", sess.ID, "error", err)
+		_ = ws.WriteJSON(map[string]string{"error": "failed to start stt streaming session"})
 		_ = ws.Close()
 		return
 	}
 
-	// 3. Instantiate and run Connection pumps
+	// 3. Instantiate and run Connection pumps (readPump, writePump, transcriptPump)
 	conn := NewConnection(
 		sess.ID,
 		sess.UserID,
 		ws,
+		h.sttService,
 		sttProvider,
-		h.llmProvider,
+		h.llmService,
 		h.contextManager,
 		h.sessionService,
 	)

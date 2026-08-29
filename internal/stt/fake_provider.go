@@ -13,7 +13,7 @@ var samplePhrases = []string{
 	"Tell me about your experience with Go and high-concurrency systems.",
 	"I built a real-time backend pipeline handling WebSockets and Redis.",
 	"How do you approach context management and memory summarization?",
-	"We use a dual-memory system with sliding windows and LLM summarization.",
+	"We use a 3-level memory system with sliding windows and background worker summarization.",
 	"What is your strategy for scaling WebSockets to ten thousand connections?",
 }
 
@@ -77,7 +77,7 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 			SessionID: f.sessionID,
 			Text:      partialText,
 			IsFinal:   false,
-			Timestamp: time.Now().UTC(),
+			CreatedAt: time.Now().UTC(),
 		}:
 		default:
 		}
@@ -88,7 +88,7 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 			SessionID: f.sessionID,
 			Text:      targetPhrase,
 			IsFinal:   true,
-			Timestamp: time.Now().UTC(),
+			CreatedAt: time.Now().UTC(),
 		}:
 		default:
 		}
@@ -100,7 +100,7 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 	return nil
 }
 
-func (f *FakeSTTProvider) ReceiveTranscript() <-chan events.TranscriptEvent {
+func (f *FakeSTTProvider) TranscriptEvents() <-chan events.TranscriptEvent {
 	return f.transcriptChan
 }
 
