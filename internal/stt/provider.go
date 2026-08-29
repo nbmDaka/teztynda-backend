@@ -1,0 +1,25 @@
+package stt
+
+import (
+	"context"
+
+	"github.com/nbmDaka/teztynda-backend/internal/events"
+)
+
+// STTProvider defines the contract for real-time speech-to-text providers
+type STTProvider interface {
+	// StartSession initializes the streaming session for a given sessionID
+	StartSession(ctx context.Context, sessionID string) error
+
+	// SendAudio streams raw PCM/encoded audio bytes to the STT provider
+	SendAudio(chunk []byte) error
+
+	// ReceiveTranscript returns a read-only channel of transcription events (both partial and final)
+	ReceiveTranscript() <-chan events.TranscriptEvent
+
+	// Close terminates the STT streaming session and cleans up resources
+	Close() error
+}
+
+// Factory function type for instantiating STT providers per connection
+type ProviderFactory func() STTProvider
