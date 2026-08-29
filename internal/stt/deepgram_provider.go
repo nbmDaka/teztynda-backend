@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -31,6 +32,7 @@ type DeepgramProvider struct {
 	sessionID      string
 	conn           *websocket.Conn
 	transcriptChan chan events.TranscriptEvent
+	seq            atomic.Int64
 	mu             sync.Mutex
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -83,6 +85,13 @@ func (d *DeepgramProvider) readLoop() {
 		default:
 			_, message, err := d.conn.ReadMessage()
 			if err != nil {
+				d.mu.Lock()
+				isClosed := d.closed
+				d.mu.Unlock()
+				if !isClosed && d.ctx.Err() == nil {
+					slog.Warn("Deepgram STT read loop closed", "session_id", d.sessionID, "error", err)
+					metrics.Default.IncSTTErrors()
+				}
 				return
 			}
 
@@ -96,6 +105,7 @@ func (d *DeepgramProvider) readLoop() {
 				if transcript != "" {
 					isFinal := resp.IsFinal || resp.SpeechFinal
 					event := events.TranscriptEvent{
+						Sequence:  d.seq.Add(1),
 						SessionID: d.sessionID,
 						Text:      transcript,
 						IsFinal:   isFinal,

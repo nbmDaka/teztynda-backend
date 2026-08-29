@@ -9,6 +9,11 @@ import (
 // writePump pumps messages from the send channel to the websocket connection
 // IMPORTANT: Only this goroutine writes to the WebSocket connection to guarantee concurrency safety.
 func (c *Connection) writePump() {
+	if c.ws == nil {
+		c.wg.Done()
+		return
+	}
+
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
@@ -20,13 +25,14 @@ func (c *Connection) writePump() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			_ = c.ws.WriteMessage(websocket.CloseMessage, []byte{})
+			_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			return
 
 		case message, ok := <-c.send:
 			_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				_ = c.ws.WriteMessage(websocket.CloseMessage, []byte{})
+				_ = c.ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 				return
 			}
 
@@ -40,6 +46,7 @@ func (c *Connection) writePump() {
 			for i := 0; i < n; i++ {
 				select {
 				case queuedMsg := <-c.send:
+					_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
 					if err := c.writeMessageFrame(queuedMsg); err != nil {
 						return
 					}
@@ -57,6 +64,9 @@ func (c *Connection) writePump() {
 }
 
 func (c *Connection) writeMessageFrame(data []byte) error {
+	if c.ws == nil {
+		return nil
+	}
 	w, err := c.ws.NextWriter(websocket.TextMessage)
 	if err != nil {
 		return err

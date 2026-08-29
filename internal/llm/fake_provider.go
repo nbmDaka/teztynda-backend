@@ -53,3 +53,52 @@ func (f *FakeLLMProvider) Generate(ctx context.Context, messages []events.ChatMe
 
 	return "I built a production-ready real-time AI assistant backend in Go using Clean Architecture, streaming audio over WebSockets to STT, maintaining 3-level memory in Redis, and auto-summarizing history before generating LLM recommendations.", nil
 }
+
+func (f *FakeLLMProvider) StreamGenerate(ctx context.Context, messages []events.ChatMessage) (<-chan StreamChunk, error) {
+	fullText, err := f.Generate(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan StreamChunk, 32)
+	words := strings.Split(fullText, " ")
+
+	go func() {
+		defer close(out)
+		wordDelay := f.responseDelay / time.Duration(max(len(words), 1))
+		if wordDelay > 10*time.Millisecond {
+			wordDelay = 10 * time.Millisecond
+		}
+
+		for i, w := range words {
+			isLast := i == len(words)-1
+			token := w
+			if !isLast {
+				token += " "
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wordDelay):
+				select {
+				case out <- StreamChunk{
+					Content: token,
+					IsFinal: isLast,
+				}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return out, nil
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

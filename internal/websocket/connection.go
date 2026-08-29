@@ -29,6 +29,7 @@ type Connection struct {
 	userID             string
 	ws                 *websocket.Conn
 	send               chan []byte
+	audioQueue         chan []byte
 	sttService         stt.Service
 	sttProvider        stt.STTProvider
 	llmService         llm.Service
@@ -36,6 +37,7 @@ type Connection struct {
 	sessionService     session.Service
 	maxAudioChunkBytes int
 	llmSemaphore       chan struct{} // limits concurrent in-flight LLM requests to prevent DoS
+	lastTranscriptSeq  int64
 	ctx                context.Context
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
@@ -66,6 +68,7 @@ func NewConnection(
 		userID:             userID,
 		ws:                 ws,
 		send:               make(chan []byte, 256),
+		audioQueue:         make(chan []byte, 100),
 		sttService:         sttService,
 		sttProvider:        sttProvider,
 		llmService:         llmService,
@@ -78,17 +81,18 @@ func NewConnection(
 	}
 }
 
-// Start launches the read, write, and STT transcript consumer pumps
+// Start launches the read, write, STT audio, and transcript consumer pumps
 func (c *Connection) Start() {
 	metrics.Default.IncActiveConnections()
 
 	// Send initial session started notification
 	c.sendMessage(events.NewSessionStartedMessage(c.sessionID))
 
-	c.wg.Add(3)
+	c.wg.Add(4)
 	go c.readPump()
 	go c.writePump()
 	go c.transcriptPump()
+	go c.audioPump()
 
 	c.wg.Wait()
 	c.cleanup()
@@ -104,6 +108,7 @@ func (c *Connection) sendMessage(msg events.OutboundMessage) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		slog.Error("Failed to marshal outbound message", "error", err)
+		metrics.Default.IncErrors()
 		return
 	}
 
@@ -112,6 +117,30 @@ func (c *Connection) sendMessage(msg events.OutboundMessage) {
 	case <-c.ctx.Done():
 	default:
 		slog.Warn("Send buffer full, dropping message frame", "session_id", c.sessionID)
+		metrics.Default.IncErrors()
+	}
+}
+
+// audioPump handles backpressured audio streaming from audioQueue to STT provider
+func (c *Connection) audioPump() {
+	defer func() {
+		c.cancel()
+		c.wg.Done()
+	}()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case chunk, ok := <-c.audioQueue:
+			if !ok {
+				return
+			}
+			if err := c.sttService.ProcessAudio(c.sttProvider, chunk); err != nil {
+				slog.Error("Failed to stream audio to STT service", "session_id", c.sessionID, "error", err)
+				metrics.Default.IncSTTErrors()
+			}
+		}
 	}
 }
 
@@ -133,8 +162,21 @@ func (c *Connection) transcriptPump() {
 				return
 			}
 
+			// Verify transcript monotonic sequence order
+			if event.Sequence > 0 && event.Sequence < c.lastTranscriptSeq {
+				slog.Warn("Out of order transcript event received, skipping",
+					"session_id", c.sessionID,
+					"seq", event.Sequence,
+					"last_seq", c.lastTranscriptSeq,
+				)
+				continue
+			}
+			if event.Sequence > 0 {
+				c.lastTranscriptSeq = event.Sequence
+			}
+
 			// Broadcast transcript event to client (both partial and final)
-			c.sendMessage(events.NewTranscriptMessage(c.sessionID, event.Text, event.IsFinal, event.CreatedAt))
+			c.sendMessage(events.NewTranscriptMessage(c.sessionID, event.Text, event.IsFinal, event.Sequence, event.CreatedAt))
 
 			if event.IsFinal && event.Text != "" {
 				// Commit to Level 2 Short Memory in Context Manager

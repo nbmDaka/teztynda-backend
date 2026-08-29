@@ -13,6 +13,7 @@ import (
 
 type Service interface {
 	GenerateAnswer(ctx context.Context, chatMessages []events.ChatMessage) (string, error)
+	StreamAnswer(ctx context.Context, chatMessages []events.ChatMessage) (<-chan StreamChunk, error)
 	GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error)
 }
 
@@ -35,6 +36,10 @@ func (s *service) GenerateAnswer(ctx context.Context, chatMessages []events.Chat
 	}
 	slog.Debug("LLM answer generation successful", "duration", time.Since(start))
 	return resp, nil
+}
+
+func (s *service) StreamAnswer(ctx context.Context, chatMessages []events.ChatMessage) (<-chan StreamChunk, error) {
+	return s.provider.StreamGenerate(ctx, chatMessages)
 }
 
 func (s *service) GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error) {

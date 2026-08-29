@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
 // readPump pumps messages from the websocket connection to the server
@@ -84,7 +86,7 @@ func (c *Connection) handleAudioChunk(base64Data string) {
 		return
 	}
 
-	// Security: validate audio chunk size limit to prevent memory exhaustion DoS
+	// Security: validate base64 string length limit before decoding
 	if len(base64Data) > c.maxAudioChunkBytes*2 {
 		c.sendMessage(events.NewErrorMessage("audio chunk exceeds maximum allowed size"))
 		return
@@ -96,10 +98,19 @@ func (c *Connection) handleAudioChunk(base64Data string) {
 		return
 	}
 
-	// Stream audio bytes directly to STT provider via STT service
-	if err := c.sttService.ProcessAudio(c.sttProvider, audioBytes); err != nil {
-		slog.Error("Failed to stream audio to STT service", "session_id", c.sessionID, "error", err)
-		c.sendMessage(events.NewErrorMessage("stt streaming error"))
+	// Security: validate decoded raw audio byte length
+	if len(audioBytes) > c.maxAudioChunkBytes {
+		c.sendMessage(events.NewErrorMessage("decoded audio chunk exceeds maximum allowed size"))
+		return
+	}
+
+	// Stream audio bytes into buffered audioQueue with backpressure handling
+	select {
+	case c.audioQueue <- audioBytes:
+		metrics.Default.SetAudioQueueSize(int64(len(c.audioQueue)))
+	default:
+		slog.Warn("Audio queue full, dropping audio chunk to preserve realtime backpressure", "session_id", c.sessionID)
+		metrics.Default.IncAudioDropped()
 	}
 }
 
@@ -119,27 +130,47 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	genCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
 
-	answerText, err := c.llmService.GenerateAnswer(genCtx, chatMessages)
+	stream, err := c.llmService.StreamAnswer(genCtx, chatMessages)
 	if err != nil {
-		slog.Error("LLM generation error", "session_id", c.sessionID, "error", err)
+		slog.Error("LLM streaming answer initiation failed", "session_id", c.sessionID, "error", err)
 		c.sendMessage(events.NewErrorMessage("llm generation failed"))
 		return
 	}
 
-	// 1. Send answer to client via writePump
+	var answerBuilder strings.Builder
+	for chunk := range stream {
+		if chunk.Error != nil {
+			slog.Error("LLM stream chunk error", "session_id", c.sessionID, "error", chunk.Error)
+			c.sendMessage(events.NewErrorMessage("llm streaming error"))
+			return
+		}
+
+		if chunk.Content != "" {
+			answerBuilder.WriteString(chunk.Content)
+			c.sendMessage(events.NewAnswerChunkMessage(c.sessionID, chunk.Content, chunk.IsFinal))
+		}
+	}
+
+	answerText := answerBuilder.String()
+	if answerText == "" {
+		slog.Warn("LLM generated empty response", "session_id", c.sessionID)
+		return
+	}
+
+	// Send final answer message for ack & client state synchronization
 	c.sendMessage(events.NewAnswerMessage(c.sessionID, answerText))
 
-	// 2. Append assistant answer to Context Manager (Short Memory)
+	// Append assistant answer to Context Manager (Short Memory)
 	_ = c.contextManager.AddMessage(c.ctx, c.sessionID, ctxpkg.Message{
 		Role:      ctxpkg.RoleAssistant,
 		Content:   answerText,
 		CreatedAt: time.Now().UTC(),
 	})
 
-	// 3. Asynchronously record generated answer to PostgreSQL
-	go func() {
+	// Asynchronously record generated answer to PostgreSQL
+	go func(ans string) {
 		bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer bgCancel()
-		_ = c.sessionService.RecordAnswer(bgCtx, c.sessionID, customPrompt, answerText)
-	}()
+		_ = c.sessionService.RecordAnswer(bgCtx, c.sessionID, customPrompt, ans)
+	}(answerText)
 }

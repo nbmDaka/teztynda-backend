@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nbmDaka/teztynda-backend/internal/events"
@@ -21,6 +22,7 @@ var samplePhrases = []string{
 type FakeSTTProvider struct {
 	sessionID      string
 	transcriptChan chan events.TranscriptEvent
+	seq            atomic.Int64
 	chunkCount     int
 	phraseIndex    int
 	mu             sync.Mutex
@@ -44,6 +46,7 @@ func (f *FakeSTTProvider) StartSession(ctx context.Context, sessionID string) er
 	f.ctx, f.cancel = context.WithCancel(ctx)
 	f.chunkCount = 0
 	f.phraseIndex = 0
+	f.seq.Store(0)
 	return nil
 }
 
@@ -78,6 +81,7 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 		partialText := strings.Join(words[:step], " ")
 		select {
 		case f.transcriptChan <- events.TranscriptEvent{
+			Sequence:  f.seq.Add(1),
 			SessionID: f.sessionID,
 			Text:      partialText,
 			IsFinal:   false,
@@ -88,6 +92,7 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 	} else {
 		select {
 		case f.transcriptChan <- events.TranscriptEvent{
+			Sequence:  f.seq.Add(1),
 			SessionID: f.sessionID,
 			Text:      targetPhrase,
 			IsFinal:   true,

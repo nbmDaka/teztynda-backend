@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ type Manager interface {
 	GetContext(ctx context.Context, sessionID string) (*SessionContext, error)
 	CreateSummary(ctx context.Context, sessionID string) error
 	BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage
+	BuildPrompt(sCtx *SessionContext, instruction string) string
 	SaveContext(ctx context.Context, sCtx *SessionContext) error
 }
 
@@ -242,6 +244,9 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 		return nil
 	}
 
+	initialVersion := sCtx.SummaryVersion
+	initialMsgCount := len(sCtx.ShortMemory)
+
 	// 2. Determine split index: keep recent turns up to shortMemoryTokens in Level 2
 	accumulatedRecentTokens := 0
 	splitIndex := len(sCtx.ShortMemory) - 1
@@ -269,7 +274,7 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 		"session_id", sessionID,
 		"compacting_count", len(messagesToSummarize),
 		"preserved_count", len(recentMessages),
-		"version", sCtx.SummaryVersion,
+		"version", initialVersion,
 	)
 
 	// 3. Generate summary via LLM
@@ -280,27 +285,50 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 
 	// 4. Reload freshest context before saving to prevent race conditions with newly added turns
 	freshCtx, err := m.GetContext(ctx, sessionID)
-	if err == nil && len(freshCtx.ShortMemory) > len(sCtx.ShortMemory) {
+	if err != nil {
+		return fmt.Errorf("failed to reload fresh context: %w", err)
+	}
+
+	// Optimistic concurrency check
+	if freshCtx.SummaryVersion != initialVersion {
+		slog.Warn("Summarization version conflict detected, skipping overwrite",
+			"session_id", sessionID,
+			"expected_version", initialVersion,
+			"actual_version", freshCtx.SummaryVersion,
+		)
+		return nil
+	}
+
+	if len(freshCtx.ShortMemory) > initialMsgCount {
 		// New messages were appended while LLM was summarizing; preserve them safely
-		newlyAdded := freshCtx.ShortMemory[len(sCtx.ShortMemory):]
+		newlyAdded := freshCtx.ShortMemory[initialMsgCount:]
 		recentMessages = append(recentMessages, newlyAdded...)
 	}
 
-	// 5. Update 3-level context state and increment version
-	sCtx.LongMemory = newSummary
-	sCtx.ShortMemory = recentMessages
-	sCtx.SummaryVersion++
-	sCtx.RecalculateTokens()
+	// 5. Update 3-level context state and increment optimistic version
+	freshCtx.LongMemory = newSummary
+	freshCtx.ShortMemory = recentMessages
+	freshCtx.SummaryVersion = initialVersion + 1
+	freshCtx.RecalculateTokens()
 
 	slog.Info("Summarization complete and memory updated",
 		"session_id", sessionID,
-		"new_tokens", sCtx.TotalTokens,
-		"new_version", sCtx.SummaryVersion,
+		"new_tokens", freshCtx.TotalTokens,
+		"new_version", freshCtx.SummaryVersion,
 	)
 
-	return m.SaveContext(ctx, sCtx)
+	return m.SaveContext(ctx, freshCtx)
 }
 
 func (m *manager) BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage {
 	return sCtx.BuildChatMessages(instruction)
+}
+
+func (m *manager) BuildPrompt(sCtx *SessionContext, instruction string) string {
+	chatMsgs := sCtx.BuildChatMessages(instruction)
+	var sb strings.Builder
+	for _, msg := range chatMsgs {
+		sb.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
+	}
+	return sb.String()
 }
