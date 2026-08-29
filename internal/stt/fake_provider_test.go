@@ -22,7 +22,7 @@ func TestFakeSTTProvider_Streaming(t *testing.T) {
 
 	// Send dummy audio chunks
 	for i := 0; i < 6; i++ {
-		err := provider.SendAudio([]byte{0x01, 0x02, 0x03, 0x04})
+		err := provider.SendAudio(ctx, []byte{0x01, 0x02, 0x03, 0x04})
 		require.NoError(t, err)
 	}
 

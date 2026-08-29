@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
 	"github.com/nbmDaka/teztynda-backend/internal/stt"
 	wsPkg "github.com/nbmDaka/teztynda-backend/internal/websocket"
@@ -23,20 +23,19 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 	// 1. Setup Providers & Services
 	llmProv := llm.NewFakeLLMProvider(10 * time.Millisecond)
 	llmSvc := llm.NewService(llmProv)
-	summarizer := ctxpkg.NewSummarizer(llmSvc)
-	contextManager := ctxpkg.NewManager(nil, summarizer, 3000, 1200, time.Hour)
+	summarizer := memory.NewSummarizer(llmSvc)
+	memoryManager := memory.NewManager(nil, summarizer, 3000, 1200, time.Hour)
 	sessionRepo := session.NewRepository(nil, nil, time.Hour)
 	sessionService := session.NewService(sessionRepo)
 
 	sttFactory := func() stt.STTProvider {
 		return stt.NewFakeSTTProvider()
 	}
-	sttSvc := stt.NewService(sttFactory)
 
 	handler := wsPkg.NewHandler(
-		sttSvc,
+		sttFactory,
 		llmSvc,
-		contextManager,
+		memoryManager,
 		sessionService,
 		"test-jwt-secret",
 		64*1024,

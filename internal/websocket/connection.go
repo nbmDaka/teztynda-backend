@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
 	"github.com/nbmDaka/teztynda-backend/internal/stt"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
@@ -31,11 +31,10 @@ type Connection struct {
 	ws                   *websocket.Conn
 	send                 chan []byte
 	audioQueue           chan []byte
-	sttService           stt.Service
 	sttProvider          stt.STTProvider
-	llmService           llm.Service
-	contextManager       ctxpkg.Manager
-	sessionService       session.Service
+	llmService           *llm.Service
+	memoryManager        *memory.Manager
+	sessionService       *session.Service
 	maxAudioChunkBytes   int
 	llmSemaphore         chan struct{} // limits concurrent in-flight LLM requests to prevent DoS
 	lastTranscriptSeq    int64
@@ -49,11 +48,10 @@ type Connection struct {
 func NewConnection(
 	sessionID, userID string,
 	ws *websocket.Conn,
-	sttService stt.Service,
 	sttProvider stt.STTProvider,
-	llmService llm.Service,
-	contextManager ctxpkg.Manager,
-	sessionService session.Service,
+	llmService *llm.Service,
+	memoryManager *memory.Manager,
+	sessionService *session.Service,
 	maxAudioChunkBytes int,
 	maxConcurrentLLMCalls int,
 ) *Connection {
@@ -71,10 +69,9 @@ func NewConnection(
 		ws:                 ws,
 		send:               make(chan []byte, 256),
 		audioQueue:         make(chan []byte, 100),
-		sttService:         sttService,
 		sttProvider:        sttProvider,
 		llmService:         llmService,
-		contextManager:     contextManager,
+		memoryManager:      memoryManager,
 		sessionService:     sessionService,
 		maxAudioChunkBytes: maxAudioChunkBytes,
 		llmSemaphore:       make(chan struct{}, maxConcurrentLLMCalls),
@@ -145,15 +142,15 @@ func (c *Connection) audioPump() {
 			if !ok {
 				return
 			}
-			if err := c.sttService.ProcessAudio(c.sttProvider, chunk); err != nil {
-				slog.Error("Failed to stream audio to STT service", "session_id", c.sessionID, "error", err)
+			if err := c.sttProvider.SendAudio(c.ctx, chunk); err != nil {
+				slog.Error("Failed to stream audio to STT provider", "session_id", c.sessionID, "error", err)
 				metrics.Default.IncSTTErrors()
 			}
 		}
 	}
 }
 
-// transcriptPump receives STT streaming results and broadcasts them to the client & context manager
+// transcriptPump receives STT streaming results and broadcasts them to the client & memory manager
 func (c *Connection) transcriptPump() {
 	defer func() {
 		c.cancel()
@@ -188,20 +185,24 @@ func (c *Connection) transcriptPump() {
 			c.sendMessage(events.NewTranscriptMessage(c.sessionID, event.Text, event.IsFinal, event.Sequence, event.CreatedAt))
 
 			if event.IsFinal && event.Text != "" {
-				// Commit to Level 2 Short Memory in Context Manager
-				if err := c.contextManager.AddTranscript(c.ctx, c.sessionID, "interviewer", event.Text); err != nil {
-					slog.Error("Failed to add transcript to context", "session_id", c.sessionID, "error", err)
+				// Commit to Level 2 Short Memory in Memory Manager
+				if err := c.memoryManager.AddTranscript(c.ctx, c.sessionID, "interviewer", event.Text); err != nil {
+					slog.Error("Failed to add transcript to memory", "session_id", c.sessionID, "error", err)
 				}
 
 				// Asynchronous persistence to PostgreSQL
 				go func(txt string) {
 					bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer bgCancel()
-					_ = c.sessionService.RecordTranscript(bgCtx, c.sessionID, "interviewer", txt, true)
+					if err := c.sessionService.RecordTranscript(bgCtx, c.sessionID, "interviewer", txt, true); err != nil {
+						slog.Error("Failed to persist transcript record to postgres", "session_id", c.sessionID, "error", err)
+					}
 				}(event.Text)
 			} else if !event.IsFinal && event.Text != "" {
 				// Update in-flight active turn in memory (Level 1) - local memory ONLY, no Redis storm!
-				_ = c.contextManager.UpdateCurrentTurn(c.ctx, c.sessionID, "interviewer", event.Text)
+				if err := c.memoryManager.UpdateCurrentTurn(c.ctx, c.sessionID, "interviewer", event.Text); err != nil {
+					slog.Debug("Failed to update current turn in memory", "session_id", c.sessionID, "error", err)
+				}
 			}
 		}
 	}
@@ -212,7 +213,7 @@ func (c *Connection) cleanup() {
 		slog.Info("Cleaning up session connection", "session_id", c.sessionID)
 		metrics.Default.DecActiveConnections()
 
-		_ = c.sttService.CloseProvider(c.sttProvider)
+		_ = c.sttProvider.Close()
 
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ func (f *FakeLLMProvider) Generate(ctx context.Context, messages []events.ChatMe
 	case <-time.After(f.responseDelay):
 	case <-ctx.Done():
 		metrics.Default.IncLLMErrors()
-		return "", ctx.Err()
+		return "", fmt.Errorf("fake llm generation canceled: %w", ctx.Err())
 	}
 
 	metrics.Default.RecordLLMLatency(time.Since(start))
@@ -94,11 +95,4 @@ func (f *FakeLLMProvider) StreamGenerate(ctx context.Context, messages []events.
 	}()
 
 	return out, nil
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

@@ -1,4 +1,4 @@
-package context
+package memory
 
 import (
 	"context"
@@ -15,18 +15,7 @@ import (
 	"github.com/nbmDaka/teztynda-backend/internal/storage"
 )
 
-type Manager interface {
-	UpdateCurrentTurn(ctx context.Context, sessionID, speaker, text string) error
-	AddTranscript(ctx context.Context, sessionID, speaker, text string) error
-	AddMessage(ctx context.Context, sessionID string, msg Message) error
-	GetContext(ctx context.Context, sessionID string) (*SessionContext, error)
-	CreateSummary(ctx context.Context, sessionID string) error
-	BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage
-	BuildPrompt(sCtx *SessionContext, instruction string) string
-	SaveContext(ctx context.Context, sCtx *SessionContext) error
-}
-
-type manager struct {
+type Manager struct {
 	redisClient       *storage.RedisClient
 	summarizer        Summarizer
 	maxContextTokens  int
@@ -48,7 +37,7 @@ func NewManager(
 	maxContextTokens int,
 	shortMemoryTokens int,
 	ttl time.Duration,
-) Manager {
+) *Manager {
 	if maxContextTokens <= 0 {
 		maxContextTokens = 3000
 	}
@@ -59,7 +48,7 @@ func NewManager(
 		ttl = 24 * time.Hour
 	}
 
-	return &manager{
+	return &Manager{
 		redisClient:       redisClient,
 		summarizer:        summarizer,
 		maxContextTokens:  maxContextTokens,
@@ -70,15 +59,15 @@ func NewManager(
 	}
 }
 
-func (m *manager) contextKey(sessionID string) string {
+func (m *Manager) contextKey(sessionID string) string {
 	return fmt.Sprintf("context:%s", sessionID)
 }
 
-func (m *manager) lockKey(sessionID string) string {
+func (m *Manager) lockKey(sessionID string) string {
 	return fmt.Sprintf("lock:summary:%s", sessionID)
 }
 
-func (m *manager) GetContext(ctx context.Context, sessionID string) (*SessionContext, error) {
+func (m *Manager) GetContext(ctx context.Context, sessionID string) (*SessionContext, error) {
 	var sCtx *SessionContext
 
 	if m.redisClient != nil {
@@ -122,7 +111,7 @@ func (m *manager) GetContext(ctx context.Context, sessionID string) (*SessionCon
 	return sCtx, nil
 }
 
-func (m *manager) SaveContext(ctx context.Context, sCtx *SessionContext) error {
+func (m *Manager) SaveContext(ctx context.Context, sCtx *SessionContext) error {
 	sCtx.UpdatedAt = time.Now().UTC()
 	sCtx.RecalculateTokens()
 
@@ -145,7 +134,7 @@ func (m *manager) SaveContext(ctx context.Context, sCtx *SessionContext) error {
 
 // UpdateCurrentTurn updates Level 1 active turn in local memory buffer ONLY
 // Zero Redis network calls for 100ms partial STT streaming updates!
-func (m *manager) UpdateCurrentTurn(ctx context.Context, sessionID, speaker, text string) error {
+func (m *Manager) UpdateCurrentTurn(ctx context.Context, sessionID, speaker, text string) error {
 	m.turnMu.Lock()
 	m.turnBuffer[sessionID] = &CurrentTurn{
 		Speaker:   speaker,
@@ -156,7 +145,7 @@ func (m *manager) UpdateCurrentTurn(ctx context.Context, sessionID, speaker, tex
 	return nil
 }
 
-func (m *manager) AddTranscript(ctx context.Context, sessionID, speaker, text string) error {
+func (m *Manager) AddTranscript(ctx context.Context, sessionID, speaker, text string) error {
 	// Clear Level 1 in-flight turn buffer upon final turn commit
 	m.turnMu.Lock()
 	delete(m.turnBuffer, sessionID)
@@ -177,10 +166,10 @@ func (m *manager) AddTranscript(ctx context.Context, sessionID, speaker, text st
 	return m.AddMessage(ctx, sessionID, msg)
 }
 
-func (m *manager) AddMessage(ctx context.Context, sessionID string, msg Message) error {
+func (m *Manager) AddMessage(ctx context.Context, sessionID string, msg Message) error {
 	sCtx, err := m.GetContext(ctx, sessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("get context for adding message: %w", err)
 	}
 
 	// Reset Level 1 turn
@@ -194,7 +183,7 @@ func (m *manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 	sCtx.RecalculateTokens()
 
 	if err := m.SaveContext(ctx, sCtx); err != nil {
-		return err
+		return fmt.Errorf("save context after adding message: %w", err)
 	}
 
 	// Check if token limit exceeded to enqueue asynchronous background task
@@ -222,7 +211,7 @@ func (m *manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 	return nil
 }
 
-func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
+func (m *Manager) CreateSummary(ctx context.Context, sessionID string) error {
 	// 1. Acquire distributed lock with TTL
 	if m.redisClient != nil {
 		locked, err := m.redisClient.AcquireLock(ctx, m.lockKey(sessionID), 25*time.Second)
@@ -231,13 +220,15 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 			return nil
 		}
 		defer func() {
-			_ = m.redisClient.ReleaseLock(context.Background(), m.lockKey(sessionID))
+			lockCtx, lCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer lCancel()
+			_ = m.redisClient.ReleaseLock(lockCtx, m.lockKey(sessionID))
 		}()
 	}
 
 	sCtx, err := m.GetContext(ctx, sessionID)
 	if err != nil {
-		return err
+		return fmt.Errorf("get context for summary creation: %w", err)
 	}
 
 	if len(sCtx.ShortMemory) <= 1 {
@@ -320,11 +311,11 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 	return m.SaveContext(ctx, freshCtx)
 }
 
-func (m *manager) BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage {
+func (m *Manager) BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage {
 	return sCtx.BuildChatMessages(instruction)
 }
 
-func (m *manager) BuildPrompt(sCtx *SessionContext, instruction string) string {
+func (m *Manager) BuildPrompt(sCtx *SessionContext, instruction string) string {
 	chatMsgs := sCtx.BuildChatMessages(instruction)
 	var sb strings.Builder
 	for _, msg := range chatMsgs {

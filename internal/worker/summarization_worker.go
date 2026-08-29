@@ -5,19 +5,19 @@ import (
 	"log/slog"
 	"time"
 
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/storage"
 )
 
 type SummarizationWorker struct {
-	redisClient    *storage.RedisClient
-	contextManager ctxpkg.Manager
+	redisClient   *storage.RedisClient
+	memoryManager *memory.Manager
 }
 
-func NewSummarizationWorker(redisClient *storage.RedisClient, contextManager ctxpkg.Manager) *SummarizationWorker {
+func NewSummarizationWorker(redisClient *storage.RedisClient, memoryManager *memory.Manager) *SummarizationWorker {
 	return &SummarizationWorker{
-		redisClient:    redisClient,
-		contextManager: contextManager,
+		redisClient:   redisClient,
+		memoryManager: memoryManager,
 	}
 }
 
@@ -53,8 +53,9 @@ func (w *SummarizationWorker) Run(ctx context.Context) {
 				"queued_at", task.TriggeredAt,
 			)
 
-			taskCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if err := w.contextManager.CreateSummary(taskCtx, task.SessionID); err != nil {
+			// Derived from parent worker context so graceful shutdown cancels in-flight jobs
+			taskCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := w.memoryManager.CreateSummary(taskCtx, task.SessionID); err != nil {
 				slog.Error("Background summarization worker error", "session_id", task.SessionID, "error", err)
 			} else {
 				slog.Info("Background summarization worker finished successfully", "session_id", task.SessionID)

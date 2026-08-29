@@ -10,8 +10,9 @@ import (
 	"time"
 
 	"github.com/nbmDaka/teztynda-backend/internal/config"
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
+	"github.com/nbmDaka/teztynda-backend/internal/session"
 	"github.com/nbmDaka/teztynda-backend/internal/storage"
 	"github.com/nbmDaka/teztynda-backend/internal/worker"
 	"github.com/nbmDaka/teztynda-backend/pkg/logger"
@@ -51,7 +52,7 @@ func main() {
 		}
 	}
 
-	// 5. LLM Provider & Context Manager for Worker
+	// 5. LLM Provider & Memory Manager for Worker
 	var llmProvider llm.LLMProvider
 	if cfg.LLMProvider == "openai" && cfg.OpenAIAPIKey != "" {
 		llmProvider = llm.NewOpenAIProvider(cfg.OpenAIAPIKey, cfg.OpenAIModel)
@@ -59,8 +60,8 @@ func main() {
 		llmProvider = llm.NewFakeLLMProvider(100 * time.Millisecond)
 	}
 	llmService := llm.NewService(llmProvider)
-	summarizer := ctxpkg.NewSummarizer(llmService)
-	contextManager := ctxpkg.NewManager(
+	summarizer := memory.NewSummarizer(llmService)
+	memoryManager := memory.NewManager(
 		redisClient,
 		summarizer,
 		cfg.MaxContextTokens,
@@ -68,11 +69,14 @@ func main() {
 		cfg.SessionTTL,
 	)
 
+	sessionRepo := session.NewRepository(redisClient, pgDB, cfg.SessionTTL)
+	sessionService := session.NewService(sessionRepo)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// 6. Launch Redis Queue Summarization Worker
-	summarizationWorker := worker.NewSummarizationWorker(redisClient, contextManager)
+	summarizationWorker := worker.NewSummarizationWorker(redisClient, memoryManager)
 	go summarizationWorker.Run(ctx)
 
 	// 7. Periodic Maintenance Ticker (e.g. prune stale sessions in DB)
@@ -85,7 +89,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-maintenanceTicker.C:
-				runMaintenanceTasks(ctx, log, pgDB)
+				runMaintenanceTasks(ctx, log, sessionService)
 			}
 		}
 	}()
@@ -101,20 +105,15 @@ func main() {
 	log.Info("Worker stopped cleanly")
 }
 
-func runMaintenanceTasks(ctx context.Context, log *slog.Logger, pgDB *storage.PostgresDB) {
+func runMaintenanceTasks(ctx context.Context, log *slog.Logger, sessionService *session.Service) {
 	log.Debug("Running background maintenance tasks...")
 
-	if pgDB != nil && pgDB.Pool != nil {
-		query := `
-		UPDATE sessions
-		SET status = 'closed', closed_at = NOW()
-		WHERE status = 'active' AND created_at < NOW() - INTERVAL '24 hours';
-		`
-		tag, err := pgDB.Pool.Exec(ctx, query)
+	if sessionService != nil {
+		count, err := sessionService.PruneStaleSessions(ctx, 24*time.Hour)
 		if err != nil {
 			log.Error("Worker failed to prune stale sessions in PostgreSQL", "error", err)
-		} else if tag.RowsAffected() > 0 {
-			log.Info("Worker marked stale sessions as closed", "count", tag.RowsAffected())
+		} else if count > 0 {
+			log.Info("Worker marked stale sessions as closed", "count", count)
 		}
 	}
 }

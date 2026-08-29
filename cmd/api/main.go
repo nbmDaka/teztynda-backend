@@ -12,9 +12,8 @@ import (
 	"time"
 
 	"github.com/nbmDaka/teztynda-backend/internal/config"
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
 	"github.com/nbmDaka/teztynda-backend/internal/storage"
 	"github.com/nbmDaka/teztynda-backend/internal/stt"
@@ -40,11 +39,7 @@ func main() {
 		"llm_provider", cfg.LLMProvider,
 	)
 
-	// 3. Lightweight Internal EventBus
-	eventBus := events.NewInMemoryEventBus()
-	defer eventBus.Close()
-
-	// 4. PostgreSQL Initialization & Auto-migration
+	// 3. PostgreSQL Initialization & Auto-migration
 	var pgDB *storage.PostgresDB
 	if cfg.PostgresDSN != "" {
 		pgDB, err = storage.NewPostgresDB(cfg.PostgresDSN)
@@ -62,7 +57,7 @@ func main() {
 		}
 	}
 
-	// 5. Redis Initialization
+	// 4. Redis Initialization
 	var redisClient *storage.RedisClient
 	if cfg.RedisURL != "" {
 		redisClient, err = storage.NewRedisClient(cfg.RedisURL, cfg.RedisPassword, cfg.RedisDB)
@@ -74,16 +69,15 @@ func main() {
 		}
 	}
 
-	// 6. STT Provider Factory & Service
+	// 5. STT Provider Factory
 	sttFactory := func() stt.STTProvider {
 		if cfg.STTProvider == "deepgram" && cfg.DeepgramAPIKey != "" {
 			return stt.NewDeepgramProvider(cfg.DeepgramAPIKey)
 		}
 		return stt.NewFakeSTTProvider()
 	}
-	sttService := stt.NewService(sttFactory)
 
-	// 7. LLM Provider & Service
+	// 6. LLM Provider & Service
 	var llmProvider llm.LLMProvider
 	if cfg.LLMProvider == "openai" && cfg.OpenAIAPIKey != "" {
 		llmProvider = llm.NewOpenAIProvider(cfg.OpenAIAPIKey, cfg.OpenAIModel)
@@ -92,9 +86,9 @@ func main() {
 	}
 	llmService := llm.NewService(llmProvider)
 
-	// 8. Context Management & Summarizer
-	summarizer := ctxpkg.NewSummarizer(llmService)
-	contextManager := ctxpkg.NewManager(
+	// 7. Context Memory Management & Summarizer
+	summarizer := memory.NewSummarizer(llmService)
+	memoryManager := memory.NewManager(
 		redisClient,
 		summarizer,
 		cfg.MaxContextTokens,
@@ -102,15 +96,15 @@ func main() {
 		cfg.SessionTTL,
 	)
 
-	// 9. Session Repository & Service (Pure session lifecycle & metadata)
+	// 8. Session Repository & Service (Pure session lifecycle & metadata)
 	sessionRepo := session.NewRepository(redisClient, pgDB, cfg.SessionTTL)
 	sessionService := session.NewService(sessionRepo)
 
-	// 10. WebSocket Handler & HTTP Router
+	// 9. WebSocket Handler & HTTP Router
 	wsHandler := websocket.NewHandler(
-		sttService,
+		sttFactory,
 		llmService,
-		contextManager,
+		memoryManager,
 		sessionService,
 		cfg.JWTSecret,
 		cfg.MaxAudioChunkBytes,
@@ -143,7 +137,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// 11. Start Server in background goroutine
+	// 10. Start Server in background goroutine
 	go func() {
 		log.Info("HTTP and WebSocket server listening", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -152,7 +146,7 @@ func main() {
 		}
 	}()
 
-	// 12. Graceful Shutdown
+	// 11. Graceful Shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

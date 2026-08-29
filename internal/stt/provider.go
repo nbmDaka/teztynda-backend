@@ -12,7 +12,7 @@ type STTProvider interface {
 	StartSession(ctx context.Context, sessionID string) error
 
 	// SendAudio streams raw PCM/encoded audio bytes to the STT provider
-	SendAudio(chunk []byte) error
+	SendAudio(ctx context.Context, chunk []byte) error
 
 	// TranscriptEvents returns a read-only channel of transcription events (both partial and final)
 	TranscriptEvents() <-chan events.TranscriptEvent
@@ -21,5 +21,5 @@ type STTProvider interface {
 	Close() error
 }
 
-// Factory function type for instantiating STT providers per connection
+// ProviderFactory is a factory function type for instantiating STT providers per connection
 type ProviderFactory func() STTProvider

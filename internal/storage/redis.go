@@ -41,36 +41,61 @@ func (r *RedisClient) Client() *redis.Client {
 }
 
 func (r *RedisClient) Close() error {
+	if r.client == nil {
+		return nil
+	}
 	return r.client.Close()
 }
 
 // AcquireLock attempts to acquire a distributed lock using SET NX EX
 func (r *RedisClient) AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	return r.client.SetNX(ctx, key, "locked", ttl).Result()
+	if r.client == nil {
+		return false, fmt.Errorf("redis client is not initialized")
+	}
+	res, err := r.client.SetNX(ctx, key, "locked", ttl).Result()
+	if err != nil {
+		return false, fmt.Errorf("acquire redis lock %s: %w", key, err)
+	}
+	return res, nil
 }
 
 // ReleaseLock releases the distributed lock
 func (r *RedisClient) ReleaseLock(ctx context.Context, key string) error {
-	return r.client.Del(ctx, key).Err()
+	if r.client == nil {
+		return nil
+	}
+	if err := r.client.Del(ctx, key).Err(); err != nil {
+		return fmt.Errorf("release redis lock %s: %w", key, err)
+	}
+	return nil
 }
 
 // PushSummarizationTask enqueues a background summarization job into Redis list
 func (r *RedisClient) PushSummarizationTask(ctx context.Context, task events.SummarizationTask) error {
+	if r.client == nil {
+		return fmt.Errorf("redis client is not initialized")
+	}
 	data, err := json.Marshal(task)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal summarization task: %w", err)
 	}
-	return r.client.LPush(ctx, QueueSummarization, data).Err()
+	if err := r.client.LPush(ctx, QueueSummarization, data).Err(); err != nil {
+		return fmt.Errorf("push summarization task to redis: %w", err)
+	}
+	return nil
 }
 
 // PopSummarizationTask blocks and pops a summarization job from the Redis queue with a timeout
 func (r *RedisClient) PopSummarizationTask(ctx context.Context, timeout time.Duration) (*events.SummarizationTask, error) {
+	if r.client == nil {
+		return nil, fmt.Errorf("redis client is not initialized")
+	}
 	res, err := r.client.BRPop(ctx, timeout, QueueSummarization).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil // timeout, queue empty
 		}
-		return nil, err
+		return nil, fmt.Errorf("pop summarization task from redis: %w", err)
 	}
 
 	if len(res) < 2 {

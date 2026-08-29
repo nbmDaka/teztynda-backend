@@ -58,10 +58,6 @@ type TranscriptEvent struct {
 	Error     error     `json:"-"`
 }
 
-func (t TranscriptEvent) Topic() string {
-	return TopicTranscriptEvents
-}
-
 // AnswerGeneratedEvent is emitted when an LLM answer is generated
 type AnswerGeneratedEvent struct {
 	SessionID string    `json:"session_id"`
@@ -70,19 +66,11 @@ type AnswerGeneratedEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func (a AnswerGeneratedEvent) Topic() string {
-	return TopicAnswerEvents
-}
-
 // SummarizationTask represents a background summarization job queued in Redis
 type SummarizationTask struct {
 	SessionID      string    `json:"session_id"`
 	SummaryVersion int64     `json:"summary_version"`
 	TriggeredAt    time.Time `json:"triggered_at"`
-}
-
-func (s SummarizationTask) Topic() string {
-	return TopicSummarizationQueue
 }
 
 // NewTranscriptMessage creates an OutboundMessage for a transcript event

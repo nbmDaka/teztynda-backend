@@ -1,4 +1,4 @@
-package context
+package memory
 
 import (
 	"fmt"
@@ -39,11 +39,11 @@ type CurrentTurn struct {
 // Level 3: Long Memory (compacted conversation summary)
 type SessionContext struct {
 	SessionID      string       `json:"session_id"`
-	SummaryVersion int64        `json:"summary_version"`       // Optimistic version counter to prevent stale summaries
+	SummaryVersion int64        `json:"summary_version"`        // Optimistic version counter to prevent stale summaries
 	CurrentTurn    *CurrentTurn `json:"current_turn,omitempty"` // Level 1: In-flight active turn
-	ShortMemory    []Message    `json:"short_memory"`          // Level 2: Recent turns (~1000-1500 tokens)
-	LongMemory     string       `json:"long_memory"`           // Level 3: Summary of older conversation
-	TotalTokens    int          `json:"total_tokens"`          // Cached sum of tokens across short & long memory
+	ShortMemory    []Message    `json:"short_memory"`           // Level 2: Recent turns (~1000-1500 tokens)
+	LongMemory     string       `json:"long_memory"`            // Level 3: Summary of older conversation
+	TotalTokens    int          `json:"total_tokens"`           // Cached sum of tokens across short & long memory
 	UpdatedAt      time.Time    `json:"updated_at"`
 }
 
@@ -75,12 +75,31 @@ func (sc *SessionContext) RecalculateTokens() {
 	sc.TotalTokens = total
 }
 
+func formatRole(role MessageRole) string {
+	switch role {
+	case RoleUser:
+		return "User"
+	case RoleInterviewer:
+		return "Interviewer"
+	case RoleCandidate:
+		return "Candidate"
+	case RoleAssistant:
+		return "Assistant"
+	case RoleSystem:
+		return "System"
+	default:
+		if len(role) > 0 {
+			return strings.ToUpper(string(role[:1])) + string(role[1:])
+		}
+		return string(role)
+	}
+}
+
 // FormatShortMemory returns human-readable formatting of the recent conversation
 func (sc *SessionContext) FormatShortMemory() string {
 	var sb strings.Builder
 	for _, m := range sc.ShortMemory {
-		roleName := strings.Title(string(m.Role))
-		sb.WriteString(fmt.Sprintf("%s: %s\n", roleName, m.Content))
+		sb.WriteString(fmt.Sprintf("%s: %s\n", formatRole(m.Role), m.Content))
 	}
 	return sb.String()
 }
@@ -112,7 +131,7 @@ func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMes
 		if msg.Role == RoleAssistant {
 			role = "assistant"
 		}
-		content := fmt.Sprintf("[%s]: %s", strings.Title(string(msg.Role)), msg.Content)
+		content := fmt.Sprintf("[%s]: %s", formatRole(msg.Role), msg.Content)
 		chatMessages = append(chatMessages, events.ChatMessage{
 			Role:    role,
 			Content: content,
@@ -121,9 +140,13 @@ func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMes
 
 	// 3. Current active in-flight turn if present
 	if sc.CurrentTurn != nil && sc.CurrentTurn.Text != "" {
+		speaker := sc.CurrentTurn.Speaker
+		if len(speaker) > 0 {
+			speaker = strings.ToUpper(speaker[:1]) + speaker[1:]
+		}
 		chatMessages = append(chatMessages, events.ChatMessage{
 			Role:    "user",
-			Content: fmt.Sprintf("[%s (currently speaking)]: %s", strings.Title(sc.CurrentTurn.Speaker), sc.CurrentTurn.Text),
+			Content: fmt.Sprintf("[%s (currently speaking)]: %s", speaker, sc.CurrentTurn.Text),
 		})
 	}
 

@@ -11,38 +11,32 @@ import (
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
-type Service interface {
-	GenerateAnswer(ctx context.Context, chatMessages []events.ChatMessage) (string, error)
-	StreamAnswer(ctx context.Context, chatMessages []events.ChatMessage) (<-chan StreamChunk, error)
-	GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error)
-}
-
-type service struct {
+type Service struct {
 	provider LLMProvider
 }
 
-func NewService(provider LLMProvider) Service {
-	return &service{
+func NewService(provider LLMProvider) *Service {
+	return &Service{
 		provider: provider,
 	}
 }
 
-func (s *service) GenerateAnswer(ctx context.Context, chatMessages []events.ChatMessage) (string, error) {
+func (s *Service) GenerateAnswer(ctx context.Context, chatMessages []events.ChatMessage) (string, error) {
 	start := time.Now()
 	resp, err := s.provider.Generate(ctx, chatMessages)
 	if err != nil {
 		slog.Error("LLM answer generation failed", "error", err, "duration", time.Since(start))
-		return "", err
+		return "", fmt.Errorf("llm generate answer: %w", err)
 	}
 	slog.Debug("LLM answer generation successful", "duration", time.Since(start))
 	return resp, nil
 }
 
-func (s *service) StreamAnswer(ctx context.Context, chatMessages []events.ChatMessage) (<-chan StreamChunk, error) {
+func (s *Service) StreamAnswer(ctx context.Context, chatMessages []events.ChatMessage) (<-chan StreamChunk, error) {
 	return s.provider.StreamGenerate(ctx, chatMessages)
 }
 
-func (s *service) GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error) {
+func (s *Service) GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error) {
 	systemMsg := events.ChatMessage{
 		Role:    "system",
 		Content: "You are an AI real-time conversation summarizer. Your task is to synthesize the existing summary and new conversation turns into a unified, concise long-term summary. Preserve key facts, technical stack mentions, architectural decisions, and candidate achievements. Keep the summary under 200 words.",
@@ -65,7 +59,7 @@ func (s *service) GenerateSummary(ctx context.Context, existingSummary, conversa
 	resp, err := s.provider.Generate(ctx, []events.ChatMessage{systemMsg, userMsg})
 	if err != nil {
 		slog.Error("LLM summarization failed", "error", err, "duration", time.Since(start))
-		return "", err
+		return "", fmt.Errorf("llm generate summary: %w", err)
 	}
 	metrics.Default.RecordLLMLatency(time.Since(start))
 	return resp, nil

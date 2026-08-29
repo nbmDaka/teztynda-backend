@@ -3,6 +3,7 @@ package stt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
+)
+
+var (
+	ErrConnectionClosed = errors.New("deepgram connection closed")
 )
 
 type DeepgramResponse struct {
@@ -133,16 +138,25 @@ func (d *DeepgramProvider) readLoop() {
 	}
 }
 
-func (d *DeepgramProvider) SendAudio(chunk []byte) error {
+func (d *DeepgramProvider) SendAudio(ctx context.Context, chunk []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if d.closed || d.conn == nil {
-		return fmt.Errorf("deepgram connection closed")
+		return ErrConnectionClosed
+	}
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("send audio context canceled: %w", ctx.Err())
+	default:
 	}
 
 	metrics.Default.IncAudioChunks()
-	return d.conn.WriteMessage(websocket.BinaryMessage, chunk)
+	if err := d.conn.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
+		return fmt.Errorf("write audio to deepgram: %w", err)
+	}
+	return nil
 }
 
 func (d *DeepgramProvider) TranscriptEvents() <-chan events.TranscriptEvent {

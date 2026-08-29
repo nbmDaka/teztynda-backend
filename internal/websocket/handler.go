@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
 	"github.com/nbmDaka/teztynda-backend/internal/stt"
 )
@@ -24,28 +24,28 @@ var upgrader = websocket.Upgrader{
 }
 
 type Handler struct {
-	sttService            stt.Service
-	llmService            llm.Service
-	contextManager        ctxpkg.Manager
-	sessionService        session.Service
+	sttFactory            stt.ProviderFactory
+	llmService            *llm.Service
+	memoryManager         *memory.Manager
+	sessionService        *session.Service
 	jwtSecret             string
 	maxAudioChunkBytes    int
 	maxConcurrentLLMCalls int
 }
 
 func NewHandler(
-	sttService stt.Service,
-	llmService llm.Service,
-	contextManager ctxpkg.Manager,
-	sessionService session.Service,
+	sttFactory stt.ProviderFactory,
+	llmService *llm.Service,
+	memoryManager *memory.Manager,
+	sessionService *session.Service,
 	jwtSecret string,
 	maxAudioChunkBytes int,
 	maxConcurrentLLMCalls int,
 ) *Handler {
 	return &Handler{
-		sttService:            sttService,
+		sttFactory:            sttFactory,
 		llmService:            llmService,
-		contextManager:        contextManager,
+		memoryManager:         memoryManager,
 		sessionService:        sessionService,
 		jwtSecret:             jwtSecret,
 		maxAudioChunkBytes:    maxAudioChunkBytes,
@@ -78,16 +78,12 @@ func (h *Handler) authenticate(r *http.Request) (string, error) {
 	return "", nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ServeHTTP handles GET /ws/realtime
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	userID, _ := h.authenticate(r)
+	userID, err := h.authenticate(r)
+	if err != nil {
+		slog.Warn("Authentication failed for WebSocket handshake", "error", err)
+	}
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -109,24 +105,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("New WebSocket connection accepted", "session_id", sess.ID, "user_id", sess.UserID)
 
-	// 2. Audio Pipeline: initialize STT provider directly through STT service
-	sttProvider, err := h.sttService.CreateProvider(context.Background(), sess.ID)
-	if err != nil {
+	// 2. Audio Pipeline: initialize STT provider directly through STT factory
+	sttProvider := h.sttFactory()
+	if err := sttProvider.StartSession(r.Context(), sess.ID); err != nil {
 		slog.Error("Failed to start STT streaming session", "session_id", sess.ID, "error", err)
 		_ = ws.WriteJSON(map[string]string{"error": "failed to start stt streaming session"})
 		_ = ws.Close()
 		return
 	}
 
-	// 3. Instantiate and run Connection pumps (readPump, writePump, transcriptPump)
+	// 3. Instantiate and run Connection pumps (readPump, writePump, transcriptPump, audioPump)
 	conn := NewConnection(
 		sess.ID,
 		sess.UserID,
 		ws,
-		h.sttService,
 		sttProvider,
 		h.llmService,
-		h.contextManager,
+		h.memoryManager,
 		h.sessionService,
 		h.maxAudioChunkBytes,
 		h.maxConcurrentLLMCalls,

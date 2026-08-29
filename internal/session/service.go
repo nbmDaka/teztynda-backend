@@ -2,30 +2,32 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-type Service interface {
-	CreateSession(ctx context.Context, userID string) (*Session, error)
-	GetSession(ctx context.Context, sessionID string) (*Session, error)
-	CloseSession(ctx context.Context, sessionID string) error
-	RecordTranscript(ctx context.Context, sessionID, speaker, text string, isFinal bool) error
-	RecordAnswer(ctx context.Context, sessionID, prompt, response string) error
+type RepositoryInterface interface {
+	SaveSession(ctx context.Context, s *Session) error
+	GetSession(ctx context.Context, id string) (*Session, error)
+	CloseSession(ctx context.Context, id string) error
+	SaveTranscript(ctx context.Context, tr *TranscriptRecord) error
+	SaveAnswer(ctx context.Context, ans *AnswerRecord) error
+	PruneStaleSessions(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
-type service struct {
-	repo Repository
+type Service struct {
+	repo RepositoryInterface
 }
 
-func NewService(repo Repository) Service {
-	return &service{
+func NewService(repo RepositoryInterface) *Service {
+	return &Service{
 		repo: repo,
 	}
 }
 
-func (s *service) CreateSession(ctx context.Context, userID string) (*Session, error) {
+func (s *Service) CreateSession(ctx context.Context, userID string) (*Session, error) {
 	if userID == "" {
 		userID = "anonymous-" + uuid.New().String()[:8]
 	}
@@ -38,21 +40,21 @@ func (s *service) CreateSession(ctx context.Context, userID string) (*Session, e
 	}
 
 	if err := s.repo.SaveSession(ctx, sess); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create session: %w", err)
 	}
 
 	return sess, nil
 }
 
-func (s *service) GetSession(ctx context.Context, sessionID string) (*Session, error) {
+func (s *Service) GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	return s.repo.GetSession(ctx, sessionID)
 }
 
-func (s *service) CloseSession(ctx context.Context, sessionID string) error {
+func (s *Service) CloseSession(ctx context.Context, sessionID string) error {
 	return s.repo.CloseSession(ctx, sessionID)
 }
 
-func (s *service) RecordTranscript(ctx context.Context, sessionID, speaker, text string, isFinal bool) error {
+func (s *Service) RecordTranscript(ctx context.Context, sessionID, speaker, text string, isFinal bool) error {
 	tr := &TranscriptRecord{
 		ID:        uuid.New().String(),
 		SessionID: sessionID,
@@ -64,7 +66,7 @@ func (s *service) RecordTranscript(ctx context.Context, sessionID, speaker, text
 	return s.repo.SaveTranscript(ctx, tr)
 }
 
-func (s *service) RecordAnswer(ctx context.Context, sessionID, prompt, response string) error {
+func (s *Service) RecordAnswer(ctx context.Context, sessionID, prompt, response string) error {
 	ans := &AnswerRecord{
 		ID:        uuid.New().String(),
 		SessionID: sessionID,
@@ -73,4 +75,8 @@ func (s *service) RecordAnswer(ctx context.Context, sessionID, prompt, response 
 		CreatedAt: time.Now().UTC(),
 	}
 	return s.repo.SaveAnswer(ctx, ans)
+}
+
+func (s *Service) PruneStaleSessions(ctx context.Context, olderThan time.Duration) (int64, error) {
+	return s.repo.PruneStaleSessions(ctx, olderThan)
 }

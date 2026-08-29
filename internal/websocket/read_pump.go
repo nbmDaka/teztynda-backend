@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
@@ -117,7 +117,7 @@ func (c *Connection) handleAudioChunk(base64Data string) {
 func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	slog.Info("Handling generate_answer command", "session_id", c.sessionID)
 
-	sCtx, err := c.contextManager.GetContext(c.ctx, c.sessionID)
+	sCtx, err := c.memoryManager.GetContext(c.ctx, c.sessionID)
 	if err != nil {
 		slog.Error("Failed to retrieve context for LLM generation", "session_id", c.sessionID, "error", err)
 		c.sendMessage(events.NewErrorMessage("failed to retrieve conversation context"))
@@ -125,7 +125,7 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	}
 
 	// Build structured role-based messages for optimal LLM completion
-	chatMessages := c.contextManager.BuildChatMessages(sCtx, customPrompt)
+	chatMessages := c.memoryManager.BuildChatMessages(sCtx, customPrompt)
 
 	genCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
@@ -160,17 +160,21 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	// Send final answer message for ack & client state synchronization
 	c.sendMessage(events.NewAnswerMessage(c.sessionID, answerText))
 
-	// Append assistant answer to Context Manager (Short Memory)
-	_ = c.contextManager.AddMessage(c.ctx, c.sessionID, ctxpkg.Message{
-		Role:      ctxpkg.RoleAssistant,
+	// Append assistant answer to Memory Manager (Short Memory)
+	if err := c.memoryManager.AddMessage(c.ctx, c.sessionID, memory.Message{
+		Role:      memory.RoleAssistant,
 		Content:   answerText,
 		CreatedAt: time.Now().UTC(),
-	})
+	}); err != nil {
+		slog.Error("Failed to add assistant message to memory", "session_id", c.sessionID, "error", err)
+	}
 
 	// Asynchronously record generated answer to PostgreSQL
 	go func(ans string) {
 		bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer bgCancel()
-		_ = c.sessionService.RecordAnswer(bgCtx, c.sessionID, customPrompt, ans)
+		if err := c.sessionService.RecordAnswer(bgCtx, c.sessionID, customPrompt, ans); err != nil {
+			slog.Error("Failed to persist answer record to postgres", "session_id", c.sessionID, "error", err)
+		}
 	}(answerText)
 }

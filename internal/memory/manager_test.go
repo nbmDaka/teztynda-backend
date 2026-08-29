@@ -1,4 +1,4 @@
-package context_test
+package memory_test
 
 import (
 	"context"
@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
-	ctxpkg "github.com/nbmDaka/teztynda-backend/internal/context"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
+	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTokenEstimation(t *testing.T) {
 	text := "Hello world, this is a test of the token estimator."
-	tokens := ctxpkg.EstimateTokens(text)
+	tokens := memory.EstimateTokens(text)
 	assert.Greater(t, tokens, 0)
 	assert.Equal(t, len(strings.TrimSpace(text))/4, tokens)
 }
@@ -22,8 +22,8 @@ func TestTokenEstimation(t *testing.T) {
 func TestContextManager_3LevelMemoryAndPrompt(t *testing.T) {
 	llmProv := llm.NewFakeLLMProvider(10 * time.Millisecond)
 	llmSvc := llm.NewService(llmProv)
-	summarizer := ctxpkg.NewSummarizer(llmSvc)
-	mgr := ctxpkg.NewManager(nil, summarizer, 3000, 1200, time.Hour)
+	summarizer := memory.NewSummarizer(llmSvc)
+	mgr := memory.NewManager(nil, summarizer, 3000, 1200, time.Hour)
 
 	ctx := context.Background()
 	sessionID := "test-session-1"
@@ -58,9 +58,9 @@ func TestContextManager_3LevelMemoryAndPrompt(t *testing.T) {
 func TestContextManager_AutoSummarization(t *testing.T) {
 	llmProv := llm.NewFakeLLMProvider(10 * time.Millisecond)
 	llmSvc := llm.NewService(llmProv)
-	summarizer := ctxpkg.NewSummarizer(llmSvc)
+	summarizer := memory.NewSummarizer(llmSvc)
 	// Small threshold to trigger auto-summarization
-	mgr := ctxpkg.NewManager(nil, summarizer, 50, 20, time.Hour)
+	mgr := memory.NewManager(nil, summarizer, 50, 20, time.Hour)
 
 	ctx := context.Background()
 	sessionID := "test-session-summarize"

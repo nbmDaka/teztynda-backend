@@ -2,6 +2,7 @@ package stt
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,12 +52,18 @@ func (f *FakeSTTProvider) StartSession(ctx context.Context, sessionID string) er
 }
 
 // SendAudio receives audio chunks and simulates streaming STT progress
-func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
+func (f *FakeSTTProvider) SendAudio(ctx context.Context, chunk []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.closed {
 		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("fake stt send audio canceled: %w", ctx.Err())
+	default:
 	}
 
 	metrics.Default.IncAudioChunks()

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PostgresDB struct {
-	Pool *pgxpool.Pool
+	pool *pgxpool.Pool
 }
 
 func NewPostgresDB(dsn string) (*PostgresDB, error) {
@@ -35,17 +37,35 @@ func NewPostgresDB(dsn string) (*PostgresDB, error) {
 		return nil, fmt.Errorf("failed to ping postgres: %w", err)
 	}
 
-	return &PostgresDB{Pool: pool}, nil
+	return &PostgresDB{pool: pool}, nil
+}
+
+func (p *PostgresDB) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	if p.pool == nil {
+		return pgconn.CommandTag{}, fmt.Errorf("postgres pool is not initialized")
+	}
+	return p.pool.Exec(ctx, sql, arguments...)
+}
+
+func (p *PostgresDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if p.pool == nil {
+		return nil
+	}
+	return p.pool.QueryRow(ctx, sql, args...)
 }
 
 func (p *PostgresDB) Close() {
-	if p.Pool != nil {
-		p.Pool.Close()
+	if p.pool != nil {
+		p.pool.Close()
 	}
 }
 
 // AutoMigrate runs the basic initial schema migration if tables don't exist
 func (p *PostgresDB) AutoMigrate(ctx context.Context) error {
+	if p.pool == nil {
+		return fmt.Errorf("postgres pool is not initialized")
+	}
+
 	query := `
 	CREATE TABLE IF NOT EXISTS users (
 		id VARCHAR(64) PRIMARY KEY,
@@ -81,7 +101,7 @@ func (p *PostgresDB) AutoMigrate(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_answers_session_id ON answers(session_id);
 	`
-	_, err := p.Pool.Exec(ctx, query)
+	_, err := p.pool.Exec(ctx, query)
 	if err != nil {
 		return fmt.Errorf("auto migration failed: %w", err)
 	}

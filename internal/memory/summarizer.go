@@ -1,4 +1,4 @@
-package context
+package memory
 
 import (
 	"context"
@@ -13,10 +13,10 @@ type Summarizer interface {
 }
 
 type summarizer struct {
-	llmService llm.Service
+	llmService *llm.Service
 }
 
-func NewSummarizer(llmService llm.Service) Summarizer {
+func NewSummarizer(llmService *llm.Service) *summarizer {
 	return &summarizer{
 		llmService: llmService,
 	}
@@ -32,5 +32,9 @@ func (s *summarizer) Summarize(ctx context.Context, existingSummary string, mess
 		sb.WriteString(fmt.Sprintf("%s: %s\n", strings.ToUpper(string(m.Role)), m.Content))
 	}
 
-	return s.llmService.GenerateSummary(ctx, existingSummary, sb.String())
+	summary, err := s.llmService.GenerateSummary(ctx, existingSummary, sb.String())
+	if err != nil {
+		return "", fmt.Errorf("generate summary: %w", err)
+	}
+	return summary, nil
 }
