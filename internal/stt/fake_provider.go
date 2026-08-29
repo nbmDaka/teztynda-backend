@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
 var samplePhrases = []string{
@@ -55,7 +56,9 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 		return nil
 	}
 
+	metrics.Default.IncAudioChunks()
 	f.chunkCount++
+
 	// Every 2 audio chunks, emit a partial or final transcription step
 	if f.chunkCount%2 != 0 {
 		return nil
@@ -69,8 +72,9 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 		step = 1
 	}
 
+	metrics.Default.IncTranscriptEvents()
+
 	if step < len(words) {
-		// Emit partial transcript
 		partialText := strings.Join(words[:step], " ")
 		select {
 		case f.transcriptChan <- events.TranscriptEvent{
@@ -82,7 +86,6 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 		default:
 		}
 	} else {
-		// Emit final transcript
 		select {
 		case f.transcriptChan <- events.TranscriptEvent{
 			SessionID: f.sessionID,
@@ -92,7 +95,6 @@ func (f *FakeSTTProvider) SendAudio(chunk []byte) error {
 		}:
 		default:
 		}
-		// Move to next phrase and reset step counter
 		f.phraseIndex++
 		f.chunkCount = 0
 	}

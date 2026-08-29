@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
 type DeepgramResponse struct {
@@ -34,6 +36,7 @@ type DeepgramProvider struct {
 	cancel         context.CancelFunc
 	closeOnce      sync.Once
 	closed         bool
+	readWg         sync.WaitGroup
 }
 
 func NewDeepgramProvider(apiKey string) *DeepgramProvider {
@@ -64,15 +67,14 @@ func (d *DeepgramProvider) StartSession(ctx context.Context, sessionID string) e
 	}
 	d.conn = conn
 
+	d.readWg.Add(1)
 	go d.readLoop()
 
 	return nil
 }
 
 func (d *DeepgramProvider) readLoop() {
-	defer func() {
-		_ = d.Close()
-	}()
+	defer d.readWg.Done()
 
 	for {
 		select {
@@ -100,6 +102,16 @@ func (d *DeepgramProvider) readLoop() {
 						CreatedAt: time.Now().UTC(),
 					}
 
+					metrics.Default.IncTranscriptEvents()
+
+					d.mu.Lock()
+					isClosed := d.closed
+					d.mu.Unlock()
+
+					if isClosed {
+						return
+					}
+
 					select {
 					case d.transcriptChan <- event:
 					case <-d.ctx.Done():
@@ -119,6 +131,7 @@ func (d *DeepgramProvider) SendAudio(chunk []byte) error {
 		return fmt.Errorf("deepgram connection closed")
 	}
 
+	metrics.Default.IncAudioChunks()
 	return d.conn.WriteMessage(websocket.BinaryMessage, chunk)
 }
 
@@ -139,7 +152,10 @@ func (d *DeepgramProvider) Close() error {
 		}
 		d.mu.Unlock()
 
+		// Wait for reader goroutine to exit before closing channel to guarantee zero panics
+		d.readWg.Wait()
 		close(d.transcriptChan)
+		slog.Debug("Deepgram STT provider closed cleanly", "session_id", d.sessionID)
 	})
 	return nil
 }

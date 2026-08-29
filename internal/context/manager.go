@@ -20,7 +20,7 @@ type Manager interface {
 	AddMessage(ctx context.Context, sessionID string, msg Message) error
 	GetContext(ctx context.Context, sessionID string) (*SessionContext, error)
 	CreateSummary(ctx context.Context, sessionID string) error
-	BuildPrompt(sCtx *SessionContext, instruction string) string
+	BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage
 	SaveContext(ctx context.Context, sCtx *SessionContext) error
 }
 
@@ -30,8 +30,14 @@ type manager struct {
 	maxContextTokens  int
 	shortMemoryTokens int
 	ttl               time.Duration
-	localMu           sync.RWMutex
-	localStore        map[string]*SessionContext
+
+	// Local buffer for Level 1 CurrentTurn to avoid Redis write storms on 100ms partial STT tokens
+	turnMu     sync.RWMutex
+	turnBuffer map[string]*CurrentTurn
+
+	// Local in-memory fallback cache (used when Redis is not configured or in tests)
+	localMu    sync.RWMutex
+	localStore map[string]*SessionContext
 }
 
 func NewManager(
@@ -57,6 +63,7 @@ func NewManager(
 		maxContextTokens:  maxContextTokens,
 		shortMemoryTokens: shortMemoryTokens,
 		ttl:               ttl,
+		turnBuffer:        make(map[string]*CurrentTurn),
 		localStore:        make(map[string]*SessionContext),
 	}
 }
@@ -70,32 +77,47 @@ func (m *manager) lockKey(sessionID string) string {
 }
 
 func (m *manager) GetContext(ctx context.Context, sessionID string) (*SessionContext, error) {
+	var sCtx *SessionContext
+
 	if m.redisClient != nil {
 		val, err := m.redisClient.Client().Get(ctx, m.contextKey(sessionID)).Result()
 		if err == nil {
-			var sCtx SessionContext
-			if err := json.Unmarshal([]byte(val), &sCtx); err == nil {
-				return &sCtx, nil
+			var parsed SessionContext
+			if err := json.Unmarshal([]byte(val), &parsed); err == nil {
+				sCtx = &parsed
 			}
 		} else if !errors.Is(err, redis.Nil) {
 			slog.Warn("Redis error when fetching context, checking local fallback store", "error", err, "session_id", sessionID)
 		}
 	}
 
-	// Fallback to local memory store
-	m.localMu.RLock()
-	defer m.localMu.RUnlock()
-	if sCtx, exists := m.localStore[sessionID]; exists {
-		copyCtx := *sCtx
-		return &copyCtx, nil
+	if sCtx == nil {
+		m.localMu.RLock()
+		if local, exists := m.localStore[sessionID]; exists {
+			copied := *local
+			sCtx = &copied
+		}
+		m.localMu.RUnlock()
 	}
 
-	// Initial empty 3-level context
-	return &SessionContext{
-		SessionID:   sessionID,
-		ShortMemory: []Message{},
-		UpdatedAt:   time.Now().UTC(),
-	}, nil
+	if sCtx == nil {
+		sCtx = &SessionContext{
+			SessionID:      sessionID,
+			SummaryVersion: 1,
+			ShortMemory:    []Message{},
+			UpdatedAt:      time.Now().UTC(),
+		}
+	}
+
+	// Attach active in-memory Level 1 CurrentTurn
+	m.turnMu.RLock()
+	if activeTurn, exists := m.turnBuffer[sessionID]; exists {
+		turnCopy := *activeTurn
+		sCtx.CurrentTurn = &turnCopy
+	}
+	m.turnMu.RUnlock()
+
+	return sCtx, nil
 }
 
 func (m *manager) SaveContext(ctx context.Context, sCtx *SessionContext) error {
@@ -119,22 +141,25 @@ func (m *manager) SaveContext(ctx context.Context, sCtx *SessionContext) error {
 	return nil
 }
 
+// UpdateCurrentTurn updates Level 1 active turn in local memory buffer ONLY
+// Zero Redis network calls for 100ms partial STT streaming updates!
 func (m *manager) UpdateCurrentTurn(ctx context.Context, sessionID, speaker, text string) error {
-	sCtx, err := m.GetContext(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-
-	sCtx.CurrentTurn = &CurrentTurn{
+	m.turnMu.Lock()
+	m.turnBuffer[sessionID] = &CurrentTurn{
 		Speaker:   speaker,
 		Text:      text,
 		UpdatedAt: time.Now().UTC(),
 	}
-
-	return m.SaveContext(ctx, sCtx)
+	m.turnMu.Unlock()
+	return nil
 }
 
 func (m *manager) AddTranscript(ctx context.Context, sessionID, speaker, text string) error {
+	// Clear Level 1 in-flight turn buffer upon final turn commit
+	m.turnMu.Lock()
+	delete(m.turnBuffer, sessionID)
+	m.turnMu.Unlock()
+
 	role := RoleInterviewer
 	if speaker == "candidate" || speaker == "user" {
 		role = RoleCandidate
@@ -156,7 +181,7 @@ func (m *manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 		return err
 	}
 
-	// Clear in-flight active turn once final turn is committed
+	// Reset Level 1 turn
 	sCtx.CurrentTurn = nil
 
 	if msg.Tokens == 0 {
@@ -170,20 +195,20 @@ func (m *manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 		return err
 	}
 
-	// Asynchronous trigger: enqueue task to Redis Queue when token threshold is reached
+	// Check if token limit exceeded to enqueue asynchronous background task
 	if sCtx.TotalTokens >= m.maxContextTokens {
 		if m.redisClient != nil {
 			task := events.SummarizationTask{
-				SessionID:   sessionID,
-				TriggeredAt: time.Now().UTC(),
+				SessionID:      sessionID,
+				SummaryVersion: sCtx.SummaryVersion,
+				TriggeredAt:    time.Now().UTC(),
 			}
 			if err := m.redisClient.PushSummarizationTask(ctx, task); err != nil {
 				slog.Error("Failed to enqueue summarization task to Redis queue", "session_id", sessionID, "error", err)
 			} else {
-				slog.Info("Summarization job enqueued to Redis background queue", "session_id", sessionID, "total_tokens", sCtx.TotalTokens)
+				slog.Info("Summarization job enqueued to Redis background queue", "session_id", sessionID, "tokens", sCtx.TotalTokens)
 			}
 		} else {
-			// In standalone test mode without Redis, run in background goroutine
 			go func(sessID string) {
 				bgCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
@@ -196,11 +221,11 @@ func (m *manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 }
 
 func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
-	// 1. Acquire distributed lock
+	// 1. Acquire distributed lock with TTL
 	if m.redisClient != nil {
-		locked, err := m.redisClient.AcquireLock(ctx, m.lockKey(sessionID), 20*time.Second)
+		locked, err := m.redisClient.AcquireLock(ctx, m.lockKey(sessionID), 25*time.Second)
 		if err != nil || !locked {
-			slog.Debug("Summarization lock already held, skipping duplicate task", "session_id", sessionID)
+			slog.Debug("Summarization lock already held, skipping duplicate worker run", "session_id", sessionID)
 			return nil
 		}
 		defer func() {
@@ -217,7 +242,7 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 		return nil
 	}
 
-	// 2. Determine split index to keep recent ~shortMemoryTokens in short memory
+	// 2. Determine split index: keep recent turns up to shortMemoryTokens in Level 2
 	accumulatedRecentTokens := 0
 	splitIndex := len(sCtx.ShortMemory) - 1
 
@@ -244,7 +269,7 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 		"session_id", sessionID,
 		"compacting_count", len(messagesToSummarize),
 		"preserved_count", len(recentMessages),
-		"prev_tokens", sCtx.TotalTokens,
+		"version", sCtx.SummaryVersion,
 	)
 
 	// 3. Generate summary via LLM
@@ -253,44 +278,29 @@ func (m *manager) CreateSummary(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("summarizer error: %w", err)
 	}
 
-	// 4. Update 3-level context state
+	// 4. Reload freshest context before saving to prevent race conditions with newly added turns
+	freshCtx, err := m.GetContext(ctx, sessionID)
+	if err == nil && len(freshCtx.ShortMemory) > len(sCtx.ShortMemory) {
+		// New messages were appended while LLM was summarizing; preserve them safely
+		newlyAdded := freshCtx.ShortMemory[len(sCtx.ShortMemory):]
+		recentMessages = append(recentMessages, newlyAdded...)
+	}
+
+	// 5. Update 3-level context state and increment version
 	sCtx.LongMemory = newSummary
 	sCtx.ShortMemory = recentMessages
+	sCtx.SummaryVersion++
 	sCtx.RecalculateTokens()
 
 	slog.Info("Summarization complete and memory updated",
 		"session_id", sessionID,
 		"new_tokens", sCtx.TotalTokens,
+		"new_version", sCtx.SummaryVersion,
 	)
 
 	return m.SaveContext(ctx, sCtx)
 }
 
-func (m *manager) BuildPrompt(sCtx *SessionContext, instruction string) string {
-	if instruction == "" {
-		instruction = "Generate the best possible answer."
-	}
-
-	var sb strings.Builder
-	sb.WriteString("System:\nYou are an AI realtime assistant.\n\n")
-
-	sb.WriteString("Conversation context:\n")
-	if sCtx.LongMemory != "" {
-		sb.WriteString("=== Long Memory Summary ===\n")
-		sb.WriteString(sCtx.LongMemory)
-		sb.WriteString("\n\n")
-	}
-
-	if len(sCtx.ShortMemory) > 0 {
-		sb.WriteString("=== Short Memory Turns ===\n")
-		sb.WriteString(sCtx.FormatShortMemory())
-		sb.WriteString("\n")
-	}
-
-	if sCtx.CurrentTurn != nil && sCtx.CurrentTurn.Text != "" {
-		sb.WriteString(fmt.Sprintf("=== Current Turn ===\n%s: %s (in progress)\n\n", sCtx.CurrentTurn.Speaker, sCtx.CurrentTurn.Text))
-	}
-
-	sb.WriteString(fmt.Sprintf("User Instruction:\n%s\n", instruction))
-	return sb.String()
+func (m *manager) BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage {
+	return sCtx.BuildChatMessages(instruction)
 }

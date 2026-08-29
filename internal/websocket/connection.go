@@ -13,6 +13,7 @@ import (
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
 	"github.com/nbmDaka/teztynda-backend/internal/stt"
+	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
 const (
@@ -24,19 +25,21 @@ const (
 
 // Connection encapsulates a client's realtime WebSocket connection session
 type Connection struct {
-	sessionID      string
-	userID         string
-	ws             *websocket.Conn
-	send           chan []byte
-	sttService     stt.Service
-	sttProvider    stt.STTProvider
-	llmService     llm.Service
-	contextManager ctxpkg.Manager
-	sessionService session.Service
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	closeOnce      sync.Once
+	sessionID          string
+	userID             string
+	ws                 *websocket.Conn
+	send               chan []byte
+	sttService         stt.Service
+	sttProvider        stt.STTProvider
+	llmService         llm.Service
+	contextManager     ctxpkg.Manager
+	sessionService     session.Service
+	maxAudioChunkBytes int
+	llmSemaphore       chan struct{} // limits concurrent in-flight LLM requests to prevent DoS
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	closeOnce          sync.Once
 }
 
 func NewConnection(
@@ -47,25 +50,38 @@ func NewConnection(
 	llmService llm.Service,
 	contextManager ctxpkg.Manager,
 	sessionService session.Service,
+	maxAudioChunkBytes int,
+	maxConcurrentLLMCalls int,
 ) *Connection {
+	if maxAudioChunkBytes <= 0 {
+		maxAudioChunkBytes = 64 * 1024
+	}
+	if maxConcurrentLLMCalls <= 0 {
+		maxConcurrentLLMCalls = 1
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Connection{
-		sessionID:      sessionID,
-		userID:         userID,
-		ws:             ws,
-		send:           make(chan []byte, 256),
-		sttService:     sttService,
-		sttProvider:    sttProvider,
-		llmService:     llmService,
-		contextManager: contextManager,
-		sessionService: sessionService,
-		ctx:            ctx,
-		cancel:         cancel,
+		sessionID:          sessionID,
+		userID:             userID,
+		ws:                 ws,
+		send:               make(chan []byte, 256),
+		sttService:         sttService,
+		sttProvider:        sttProvider,
+		llmService:         llmService,
+		contextManager:     contextManager,
+		sessionService:     sessionService,
+		maxAudioChunkBytes: maxAudioChunkBytes,
+		llmSemaphore:       make(chan struct{}, maxConcurrentLLMCalls),
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 }
 
 // Start launches the read, write, and STT transcript consumer pumps
 func (c *Connection) Start() {
+	metrics.Default.IncActiveConnections()
+
 	// Send initial session started notification
 	c.sendMessage(events.NewSessionStartedMessage(c.sessionID))
 
@@ -79,6 +95,12 @@ func (c *Connection) Start() {
 }
 
 func (c *Connection) sendMessage(msg events.OutboundMessage) {
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		slog.Error("Failed to marshal outbound message", "error", err)
@@ -87,6 +109,7 @@ func (c *Connection) sendMessage(msg events.OutboundMessage) {
 
 	select {
 	case c.send <- data:
+	case <-c.ctx.Done():
 	default:
 		slog.Warn("Send buffer full, dropping message frame", "session_id", c.sessionID)
 	}
@@ -114,19 +137,19 @@ func (c *Connection) transcriptPump() {
 			c.sendMessage(events.NewTranscriptMessage(c.sessionID, event.Text, event.IsFinal, event.CreatedAt))
 
 			if event.IsFinal && event.Text != "" {
-				// Commit to Context Manager (Short Memory)
+				// Commit to Level 2 Short Memory in Context Manager
 				if err := c.contextManager.AddTranscript(c.ctx, c.sessionID, "interviewer", event.Text); err != nil {
 					slog.Error("Failed to add transcript to context", "session_id", c.sessionID, "error", err)
 				}
 
-				// Asynchronous persistence to PostgreSQL (permanent history)
+				// Asynchronous persistence to PostgreSQL
 				go func(txt string) {
 					bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer bgCancel()
 					_ = c.sessionService.RecordTranscript(bgCtx, c.sessionID, "interviewer", txt, true)
 				}(event.Text)
 			} else if !event.IsFinal && event.Text != "" {
-				// Update in-flight active turn in memory (Level 1)
+				// Update in-flight active turn in memory (Level 1) - local memory ONLY, no Redis storm!
 				_ = c.contextManager.UpdateCurrentTurn(c.ctx, c.sessionID, "interviewer", event.Text)
 			}
 		}
@@ -136,6 +159,8 @@ func (c *Connection) transcriptPump() {
 func (c *Connection) cleanup() {
 	c.closeOnce.Do(func() {
 		slog.Info("Cleaning up session connection", "session_id", c.sessionID)
+		metrics.Default.DecActiveConnections()
+
 		_ = c.sttService.CloseProvider(c.sttProvider)
 
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

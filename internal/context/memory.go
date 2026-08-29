@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/nbmDaka/teztynda-backend/internal/events"
 )
 
 type MessageRole string
@@ -32,16 +34,17 @@ type CurrentTurn struct {
 }
 
 // SessionContext represents the 3-Level Memory System for a session
-// Level 1: Current Turn (active in-flight turn)
+// Level 1: Current Turn (active in-flight turn, buffered in memory to prevent Redis write storms)
 // Level 2: Short Memory (recent conversation turns, ~1000-1500 tokens)
 // Level 3: Long Memory (compacted conversation summary)
 type SessionContext struct {
-	SessionID   string       `json:"session_id"`
-	CurrentTurn *CurrentTurn `json:"current_turn,omitempty"` // Level 1: In-flight active turn
-	ShortMemory []Message    `json:"short_memory"`          // Level 2: Recent turns (~1000-1500 tokens)
-	LongMemory  string       `json:"long_memory"`           // Level 3: Summary of older conversation
-	TotalTokens int          `json:"total_tokens"`          // Cached sum of tokens across short & long memory
-	UpdatedAt   time.Time    `json:"updated_at"`
+	SessionID      string       `json:"session_id"`
+	SummaryVersion int64        `json:"summary_version"`       // Optimistic version counter to prevent stale summaries
+	CurrentTurn    *CurrentTurn `json:"current_turn,omitempty"` // Level 1: In-flight active turn
+	ShortMemory    []Message    `json:"short_memory"`          // Level 2: Recent turns (~1000-1500 tokens)
+	LongMemory     string       `json:"long_memory"`           // Level 3: Summary of older conversation
+	TotalTokens    int          `json:"total_tokens"`          // Cached sum of tokens across short & long memory
+	UpdatedAt      time.Time    `json:"updated_at"`
 }
 
 // EstimateTokens provides a token count heuristic (~4 characters per token)
@@ -80,4 +83,55 @@ func (sc *SessionContext) FormatShortMemory() string {
 		sb.WriteString(fmt.Sprintf("%s: %s\n", roleName, m.Content))
 	}
 	return sb.String()
+}
+
+// BuildChatMessages constructs role-based ChatMessages for the LLM
+func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMessage {
+	if instruction == "" {
+		instruction = "Generate the best possible answer."
+	}
+
+	var chatMessages []events.ChatMessage
+
+	// 1. System Prompt with Long-term memory
+	var sysContent strings.Builder
+	sysContent.WriteString("You are an expert AI realtime copilot and assistant.\n")
+	if sc.LongMemory != "" {
+		sysContent.WriteString("\n=== Long-Term Conversation Summary ===\n")
+		sysContent.WriteString(sc.LongMemory)
+		sysContent.WriteString("\n")
+	}
+	chatMessages = append(chatMessages, events.ChatMessage{
+		Role:    "system",
+		Content: sysContent.String(),
+	})
+
+	// 2. Short Memory Turns
+	for _, msg := range sc.ShortMemory {
+		role := "user"
+		if msg.Role == RoleAssistant {
+			role = "assistant"
+		}
+		content := fmt.Sprintf("[%s]: %s", strings.Title(string(msg.Role)), msg.Content)
+		chatMessages = append(chatMessages, events.ChatMessage{
+			Role:    role,
+			Content: content,
+		})
+	}
+
+	// 3. Current active in-flight turn if present
+	if sc.CurrentTurn != nil && sc.CurrentTurn.Text != "" {
+		chatMessages = append(chatMessages, events.ChatMessage{
+			Role:    "user",
+			Content: fmt.Sprintf("[%s (currently speaking)]: %s", strings.Title(sc.CurrentTurn.Speaker), sc.CurrentTurn.Text),
+		})
+	}
+
+	// 4. Final user prompt
+	chatMessages = append(chatMessages, events.ChatMessage{
+		Role:    "user",
+		Content: instruction,
+	})
+
+	return chatMessages
 }

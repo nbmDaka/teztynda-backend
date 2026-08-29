@@ -6,10 +6,13 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
 type Service interface {
-	GenerateAnswer(ctx context.Context, contextPrompt string) (string, error)
+	GenerateAnswer(ctx context.Context, chatMessages []events.ChatMessage) (string, error)
 	GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error)
 }
 
@@ -23,36 +26,42 @@ func NewService(provider LLMProvider) Service {
 	}
 }
 
-func (s *service) GenerateAnswer(ctx context.Context, contextPrompt string) (string, error) {
+func (s *service) GenerateAnswer(ctx context.Context, chatMessages []events.ChatMessage) (string, error) {
 	start := time.Now()
-	resp, err := s.provider.Generate(ctx, contextPrompt)
+	resp, err := s.provider.Generate(ctx, chatMessages)
 	if err != nil {
-		slog.Error("LLM generation failed", "error", err, "duration", time.Since(start))
+		slog.Error("LLM answer generation failed", "error", err, "duration", time.Since(start))
 		return "", err
 	}
-	slog.Debug("LLM generation successful", "duration", time.Since(start))
+	slog.Debug("LLM answer generation successful", "duration", time.Since(start))
 	return resp, nil
 }
 
 func (s *service) GenerateSummary(ctx context.Context, existingSummary, conversationText string) (string, error) {
-	prompt := fmt.Sprintf(`You are an AI real-time conversation summarizer.
+	systemMsg := events.ChatMessage{
+		Role:    "system",
+		Content: "You are an AI real-time conversation summarizer. Your task is to synthesize the existing summary and new conversation turns into a unified, concise long-term summary. Preserve key facts, technical stack mentions, architectural decisions, and candidate achievements. Keep the summary under 200 words.",
+	}
 
-Existing Summary:
-%s
+	userMsg := events.ChatMessage{
+		Role: "user",
+		Content: fmt.Sprintf("Existing Summary:\n%s\n\nNew conversation turns:\n%s",
+			func() string {
+				if strings.TrimSpace(existingSummary) == "" {
+					return "None (Conversation just started)"
+				}
+				return existingSummary
+			}(),
+			conversationText,
+		),
+	}
 
-New conversation turns to incorporate:
-%s
-
-Task:
-Synthesize the existing summary and the new conversation turns into a unified, concise long-term summary. Preserve key facts, technical stack mentions, architectural decisions, and candidate achievements. Keep the summary under 200 words.`,
-		func() string {
-			if strings.TrimSpace(existingSummary) == "" {
-				return "None (Conversation just started)"
-			}
-			return existingSummary
-		}(),
-		conversationText,
-	)
-
-	return s.provider.Generate(ctx, prompt)
+	start := time.Now()
+	resp, err := s.provider.Generate(ctx, []events.ChatMessage{systemMsg, userMsg})
+	if err != nil {
+		slog.Error("LLM summarization failed", "error", err, "duration", time.Since(start))
+		return "", err
+	}
+	metrics.Default.RecordLLMLatency(time.Since(start))
+	return resp, nil
 }

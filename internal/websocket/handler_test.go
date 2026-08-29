@@ -33,7 +33,15 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 	}
 	sttSvc := stt.NewService(sttFactory)
 
-	handler := wsPkg.NewHandler(sttSvc, llmSvc, contextManager, sessionService)
+	handler := wsPkg.NewHandler(
+		sttSvc,
+		llmSvc,
+		contextManager,
+		sessionService,
+		"test-jwt-secret",
+		64*1024,
+		2,
+	)
 
 	server := httptest.NewServer(http.HandlerFunc(handler.ServeHTTP))
 	defer server.Close()

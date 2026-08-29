@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -23,10 +24,13 @@ var upgrader = websocket.Upgrader{
 }
 
 type Handler struct {
-	sttService     stt.Service
-	llmService     llm.Service
-	contextManager ctxpkg.Manager
-	sessionService session.Service
+	sttService            stt.Service
+	llmService            llm.Service
+	contextManager        ctxpkg.Manager
+	sessionService        session.Service
+	jwtSecret             string
+	maxAudioChunkBytes    int
+	maxConcurrentLLMCalls int
 }
 
 func NewHandler(
@@ -34,22 +38,60 @@ func NewHandler(
 	llmService llm.Service,
 	contextManager ctxpkg.Manager,
 	sessionService session.Service,
+	jwtSecret string,
+	maxAudioChunkBytes int,
+	maxConcurrentLLMCalls int,
 ) *Handler {
 	return &Handler{
-		sttService:     sttService,
-		llmService:     llmService,
-		contextManager: contextManager,
-		sessionService: sessionService,
+		sttService:            sttService,
+		llmService:            llmService,
+		contextManager:        contextManager,
+		sessionService:        sessionService,
+		jwtSecret:             jwtSecret,
+		maxAudioChunkBytes:    maxAudioChunkBytes,
+		maxConcurrentLLMCalls: maxConcurrentLLMCalls,
 	}
+}
+
+// authenticate extracts user identity from query parameters or Authorization header
+func (h *Handler) authenticate(r *http.Request) (string, error) {
+	// 1. Check query param user_id or token
+	userID := r.URL.Query().Get("user_id")
+	token := r.URL.Query().Get("token")
+
+	if token == "" {
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+	}
+
+	// In a real JWT setup, parse and validate token claims here.
+	// For dev/flexibility, if user_id or token is supplied, use it; otherwise fallback to anonymous ID
+	if userID != "" {
+		return userID, nil
+	}
+	if token != "" {
+		return "user-" + token[:min(len(token), 8)], nil
+	}
+
+	return "", nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ServeHTTP handles GET /ws/realtime
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("user_id")
+	userID, _ := h.authenticate(r)
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Error("Failed to upgrade websocket", "error", err)
+		slog.Error("Failed to upgrade websocket connection", "error", err)
 		return
 	}
 
@@ -86,6 +128,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.llmService,
 		h.contextManager,
 		h.sessionService,
+		h.maxAudioChunkBytes,
+		h.maxConcurrentLLMCalls,
 	)
 
 	conn.Start()

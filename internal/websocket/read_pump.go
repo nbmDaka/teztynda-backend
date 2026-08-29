@@ -57,8 +57,16 @@ func (c *Connection) handleClientMessage(raw []byte) {
 		c.handleAudioChunk(inMsg.Data)
 
 	case events.TypeGenerateAnswer:
-		// Command Pipeline: Spawns non-blocking goroutine so readPump is never blocked
-		go c.handleGenerateAnswer(inMsg.Prompt)
+		// Command Pipeline: Enforce per-connection rate-limit with semaphore, execute in background goroutine
+		select {
+		case c.llmSemaphore <- struct{}{}:
+			go func(prompt string) {
+				defer func() { <-c.llmSemaphore }()
+				c.handleGenerateAnswer(prompt)
+			}(inMsg.Prompt)
+		default:
+			c.sendMessage(events.NewErrorMessage("rate limit exceeded: generation already in progress"))
+		}
 
 	case events.TypeClientPing:
 		c.sendMessage(events.OutboundMessage{
@@ -73,6 +81,12 @@ func (c *Connection) handleClientMessage(raw []byte) {
 
 func (c *Connection) handleAudioChunk(base64Data string) {
 	if base64Data == "" {
+		return
+	}
+
+	// Security: validate audio chunk size limit to prevent memory exhaustion DoS
+	if len(base64Data) > c.maxAudioChunkBytes*2 {
+		c.sendMessage(events.NewErrorMessage("audio chunk exceeds maximum allowed size"))
 		return
 	}
 
@@ -99,12 +113,13 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 		return
 	}
 
-	fullPrompt := c.contextManager.BuildPrompt(sCtx, customPrompt)
+	// Build structured role-based messages for optimal LLM completion
+	chatMessages := c.contextManager.BuildChatMessages(sCtx, customPrompt)
 
 	genCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
 
-	answerText, err := c.llmService.GenerateAnswer(genCtx, fullPrompt)
+	answerText, err := c.llmService.GenerateAnswer(genCtx, chatMessages)
 	if err != nil {
 		slog.Error("LLM generation error", "session_id", c.sessionID, "error", err)
 		c.sendMessage(events.NewErrorMessage("llm generation failed"))

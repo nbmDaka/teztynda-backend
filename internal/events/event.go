@@ -21,7 +21,7 @@ const (
 	TypeServerPong     = "pong"
 )
 
-// InboundMessage represents an incoming message from the WebSocket client
+// InboundMessage represents an incoming frame from the WebSocket client
 type InboundMessage struct {
 	Type   string          `json:"type"`
 	Data   string          `json:"data,omitempty"`   // base64 encoded audio chunk
@@ -40,6 +40,12 @@ type OutboundMessage struct {
 	Payload   interface{} `json:"payload,omitempty"`
 }
 
+// ChatMessage represents a structured role-based message for LLM interactions
+type ChatMessage struct {
+	Role    string `json:"role"` // "system", "user", "assistant"
+	Content string `json:"content"`
+}
+
 // TranscriptEvent is emitted by the STT provider and passed through the audio pipeline
 type TranscriptEvent struct {
 	SessionID string    `json:"session_id"`
@@ -49,10 +55,31 @@ type TranscriptEvent struct {
 	Error     error     `json:"-"`
 }
 
+func (t TranscriptEvent) Topic() string {
+	return TopicTranscriptEvents
+}
+
+// AnswerGeneratedEvent is emitted when an LLM answer is generated
+type AnswerGeneratedEvent struct {
+	SessionID string    `json:"session_id"`
+	Prompt    string    `json:"prompt"`
+	Response  string    `json:"response"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (a AnswerGeneratedEvent) Topic() string {
+	return TopicAnswerEvents
+}
+
 // SummarizationTask represents a background summarization job queued in Redis
 type SummarizationTask struct {
-	SessionID   string    `json:"session_id"`
-	TriggeredAt time.Time `json:"triggered_at"`
+	SessionID      string    `json:"session_id"`
+	SummaryVersion int64     `json:"summary_version"`
+	TriggeredAt    time.Time `json:"triggered_at"`
+}
+
+func (s SummarizationTask) Topic() string {
+	return TopicSummarizationQueue
 }
 
 // NewTranscriptMessage creates an OutboundMessage for a transcript event

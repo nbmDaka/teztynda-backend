@@ -30,21 +30,21 @@ func (c *Connection) writePump() {
 				return
 			}
 
-			w, err := c.ws.NextWriter(websocket.TextMessage)
-			if err != nil {
+			// Write individual JSON text frame
+			if err := c.writeMessageFrame(message); err != nil {
 				return
 			}
-			_, _ = w.Write(message)
 
-			// Drain queued messages into the same buffer to optimize write throughput
+			// Drain any pending queued messages, sending each as a discrete WebSocket text frame
 			n := len(c.send)
 			for i := 0; i < n; i++ {
-				_, _ = w.Write([]byte{'\n'})
-				_, _ = w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
+				select {
+				case queuedMsg := <-c.send:
+					if err := c.writeMessageFrame(queuedMsg); err != nil {
+						return
+					}
+				default:
+				}
 			}
 
 		case <-ticker.C:
@@ -54,4 +54,16 @@ func (c *Connection) writePump() {
 			}
 		}
 	}
+}
+
+func (c *Connection) writeMessageFrame(data []byte) error {
+	w, err := c.ws.NextWriter(websocket.TextMessage)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		_ = w.Close()
+		return err
+	}
+	return w.Close()
 }

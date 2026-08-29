@@ -8,6 +8,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
 type OpenAIProvider struct {
@@ -18,13 +21,8 @@ type OpenAIProvider struct {
 
 type openAIChatRequest struct {
 	Model       string               `json:"model"`
-	Messages    []openAIChatMessage  `json:"messages"`
+	Messages    []events.ChatMessage `json:"messages"`
 	Temperature float32              `json:"temperature"`
-}
-
-type openAIChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
 }
 
 type openAIChatResponse struct {
@@ -52,22 +50,25 @@ func NewOpenAIProvider(apiKey, model string) *OpenAIProvider {
 	}
 }
 
-func (o *OpenAIProvider) Generate(ctx context.Context, prompt string) (string, error) {
+func (o *OpenAIProvider) Generate(ctx context.Context, messages []events.ChatMessage) (string, error) {
+	start := time.Now()
+	metrics.Default.IncLLMRequests()
+
 	reqBody := openAIChatRequest{
-		Model: o.model,
-		Messages: []openAIChatMessage{
-			{Role: "user", Content: prompt},
-		},
+		Model:       o.model,
+		Messages:    messages,
 		Temperature: 0.7,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("failed to marshal openai request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonData))
 	if err != nil {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("failed to create http request: %w", err)
 	}
 
@@ -76,29 +77,37 @@ func (o *OpenAIProvider) Generate(ctx context.Context, prompt string) (string, e
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("openai request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	metrics.Default.RecordLLMLatency(time.Since(start))
+
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("failed to read openai response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("openai returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var chatResp openAIChatResponse
 	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("failed to parse openai response json: %w", err)
 	}
 
 	if chatResp.Error != nil {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("openai api error: %s", chatResp.Error.Message)
 	}
 
 	if len(chatResp.Choices) == 0 {
+		metrics.Default.IncLLMErrors()
 		return "", fmt.Errorf("openai returned no choices")
 	}
 
