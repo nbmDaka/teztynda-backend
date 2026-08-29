@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
 	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
@@ -95,16 +94,16 @@ func TestLoad_1000ConcurrentWebSocketClients(t *testing.T) {
 			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
 			// Step 1: Read session_started event
-			var startMsg events.OutboundMessage
-			if err := conn.ReadJSON(&startMsg); err != nil || startMsg.Type != events.TypeSessionStarted {
+			var startMsg wsPkg.OutboundMessage
+			if err := conn.ReadJSON(&startMsg); err != nil || startMsg.Type != wsPkg.TypeSessionStarted {
 				errorCount.Add(1)
 				return
 			}
 
 			// Step 2: Send audio chunks
 			for c := 0; c < 4; c++ {
-				chunkMsg := events.InboundMessage{
-					Type: events.TypeAudioChunk,
+				chunkMsg := wsPkg.InboundMessage{
+					Type: wsPkg.TypeAudioChunk,
 					Data: audioPayload,
 				}
 				if err := conn.WriteJSON(chunkMsg); err != nil {
@@ -114,8 +113,8 @@ func TestLoad_1000ConcurrentWebSocketClients(t *testing.T) {
 			}
 
 			// Step 3: Send generate_answer command
-			genMsg := events.InboundMessage{
-				Type:   events.TypeGenerateAnswer,
+			genMsg := wsPkg.InboundMessage{
+				Type:   wsPkg.TypeGenerateAnswer,
 				Prompt: "Briefly explain Go concurrency",
 			}
 			if err := conn.WriteJSON(genMsg); err != nil {
@@ -126,11 +125,11 @@ func TestLoad_1000ConcurrentWebSocketClients(t *testing.T) {
 			// Step 4: Read until final answer is received
 			gotAnswer := false
 			for {
-				var outMsg events.OutboundMessage
+				var outMsg wsPkg.OutboundMessage
 				if err := conn.ReadJSON(&outMsg); err != nil {
 					break
 				}
-				if outMsg.Type == events.TypeAnswer {
+				if outMsg.Type == wsPkg.TypeAnswer {
 					gotAnswer = true
 					break
 				}

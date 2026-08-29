@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
 	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
@@ -54,17 +53,17 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 	assert.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
 
 	// 2. Receive session_started event
-	var msg1 events.OutboundMessage
+	var msg1 wsPkg.OutboundMessage
 	err = conn.ReadJSON(&msg1)
 	require.NoError(t, err)
-	assert.Equal(t, events.TypeSessionStarted, msg1.Type)
+	assert.Equal(t, wsPkg.TypeSessionStarted, msg1.Type)
 	assert.NotEmpty(t, msg1.SessionID)
 
 	// 3. Stream audio chunks
 	audioPayload := base64.StdEncoding.EncodeToString([]byte{0x00, 0x01, 0x02, 0x03})
 	for i := 0; i < 4; i++ {
-		audioMsg := events.InboundMessage{
-			Type: events.TypeAudioChunk,
+		audioMsg := wsPkg.InboundMessage{
+			Type: wsPkg.TypeAudioChunk,
 			Data: audioPayload,
 		}
 		err = conn.WriteJSON(audioMsg)
@@ -72,32 +71,32 @@ func TestWebSocketHandler_EndToEndFlow(t *testing.T) {
 	}
 
 	// 4. Receive transcript event
-	var msg2 events.OutboundMessage
+	var msg2 wsPkg.OutboundMessage
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	err = conn.ReadJSON(&msg2)
 	require.NoError(t, err)
-	assert.Equal(t, events.TypeTranscript, msg2.Type)
+	assert.Equal(t, wsPkg.TypeTranscript, msg2.Type)
 	assert.NotEmpty(t, msg2.Text)
 
 	// 5. Send generate_answer command
-	genMsg := events.InboundMessage{
-		Type: events.TypeGenerateAnswer,
+	genMsg := wsPkg.InboundMessage{
+		Type: wsPkg.TypeGenerateAnswer,
 	}
 	err = conn.WriteJSON(genMsg)
 	require.NoError(t, err)
 
 	// 6. Receive answer event
-	var msg3 events.OutboundMessage
+	var msg3 wsPkg.OutboundMessage
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		var m events.OutboundMessage
+		var m wsPkg.OutboundMessage
 		err = conn.ReadJSON(&m)
 		require.NoError(t, err)
-		if m.Type == events.TypeAnswer {
+		if m.Type == wsPkg.TypeAnswer {
 			msg3 = m
 			break
 		}
 	}
-	assert.Equal(t, events.TypeAnswer, msg3.Type)
+	assert.Equal(t, wsPkg.TypeAnswer, msg3.Type)
 	assert.NotEmpty(t, msg3.Text)
 }

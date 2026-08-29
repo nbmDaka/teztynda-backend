@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
@@ -47,18 +46,18 @@ func (c *Connection) readPump() {
 }
 
 func (c *Connection) handleClientMessage(raw []byte) {
-	var inMsg events.InboundMessage
+	var inMsg InboundMessage
 	if err := json.Unmarshal(raw, &inMsg); err != nil {
-		c.sendMessage(events.NewErrorMessage("invalid json payload"))
+		c.sendMessage(NewErrorMessage("invalid json payload"))
 		return
 	}
 
 	switch inMsg.Type {
-	case events.TypeAudioChunk:
+	case TypeAudioChunk:
 		// Audio Pipeline: WebSocket -> Audio Chunk -> STT Service (direct streaming, no disk storage)
 		c.handleAudioChunk(inMsg.Data)
 
-	case events.TypeGenerateAnswer:
+	case TypeGenerateAnswer:
 		// Command Pipeline: Enforce per-connection rate-limit with semaphore, execute in background goroutine
 		select {
 		case c.llmSemaphore <- struct{}{}:
@@ -67,12 +66,12 @@ func (c *Connection) handleClientMessage(raw []byte) {
 				c.handleGenerateAnswer(prompt)
 			}(inMsg.Prompt)
 		default:
-			c.sendMessage(events.NewErrorMessage("rate limit exceeded: generation already in progress"))
+			c.sendMessage(NewErrorMessage("rate limit exceeded: generation already in progress"))
 		}
 
-	case events.TypeClientPing:
-		c.sendMessage(events.OutboundMessage{
-			Type:      events.TypeServerPong,
+	case TypeClientPing:
+		c.sendMessage(OutboundMessage{
+			Type:      TypeServerPong,
 			Timestamp: time.Now().UnixMilli(),
 		})
 
@@ -88,19 +87,19 @@ func (c *Connection) handleAudioChunk(base64Data string) {
 
 	// Security: validate base64 string length limit before decoding
 	if len(base64Data) > c.maxAudioChunkBytes*2 {
-		c.sendMessage(events.NewErrorMessage("audio chunk exceeds maximum allowed size"))
+		c.sendMessage(NewErrorMessage("audio chunk exceeds maximum allowed size"))
 		return
 	}
 
 	audioBytes, err := base64.StdEncoding.DecodeString(base64Data)
 	if err != nil {
-		c.sendMessage(events.NewErrorMessage("failed to decode base64 audio"))
+		c.sendMessage(NewErrorMessage("failed to decode base64 audio"))
 		return
 	}
 
 	// Security: validate decoded raw audio byte length
 	if len(audioBytes) > c.maxAudioChunkBytes {
-		c.sendMessage(events.NewErrorMessage("decoded audio chunk exceeds maximum allowed size"))
+		c.sendMessage(NewErrorMessage("decoded audio chunk exceeds maximum allowed size"))
 		return
 	}
 
@@ -120,7 +119,7 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	sCtx, err := c.memoryManager.GetContext(c.ctx, c.sessionID)
 	if err != nil {
 		slog.Error("Failed to retrieve context for LLM generation", "session_id", c.sessionID, "error", err)
-		c.sendMessage(events.NewErrorMessage("failed to retrieve conversation context"))
+		c.sendMessage(NewErrorMessage("failed to retrieve conversation context"))
 		return
 	}
 
@@ -133,7 +132,7 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	stream, err := c.llmService.StreamAnswer(genCtx, chatMessages)
 	if err != nil {
 		slog.Error("LLM streaming answer initiation failed", "session_id", c.sessionID, "error", err)
-		c.sendMessage(events.NewErrorMessage("llm generation failed"))
+		c.sendMessage(NewErrorMessage("llm generation failed"))
 		return
 	}
 
@@ -141,13 +140,13 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	for chunk := range stream {
 		if chunk.Error != nil {
 			slog.Error("LLM stream chunk error", "session_id", c.sessionID, "error", chunk.Error)
-			c.sendMessage(events.NewErrorMessage("llm streaming error"))
+			c.sendMessage(NewErrorMessage("llm streaming error"))
 			return
 		}
 
 		if chunk.Content != "" {
 			answerBuilder.WriteString(chunk.Content)
-			c.sendMessage(events.NewAnswerChunkMessage(c.sessionID, chunk.Content, chunk.IsFinal))
+			c.sendMessage(NewAnswerChunkMessage(c.sessionID, chunk.Content, chunk.IsFinal))
 		}
 	}
 
@@ -158,7 +157,7 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 	}
 
 	// Send final answer message for ack & client state synchronization
-	c.sendMessage(events.NewAnswerMessage(c.sessionID, answerText))
+	c.sendMessage(NewAnswerMessage(c.sessionID, answerText))
 
 	// Append assistant answer to Memory Manager (Short Memory)
 	if err := c.memoryManager.AddMessage(c.ctx, c.sessionID, memory.Message{
@@ -169,8 +168,10 @@ func (c *Connection) handleGenerateAnswer(customPrompt string) {
 		slog.Error("Failed to add assistant message to memory", "session_id", c.sessionID, "error", err)
 	}
 
-	// Asynchronously record generated answer to PostgreSQL
+	// Fix 1: Tracked asynchronous persistence to PostgreSQL
+	c.wg.Add(1)
 	go func(ans string) {
+		defer c.wg.Done()
 		bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer bgCancel()
 		if err := c.sessionService.RecordAnswer(bgCtx, c.sessionID, customPrompt, ans); err != nil {

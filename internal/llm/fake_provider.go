@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
@@ -21,7 +20,7 @@ func NewFakeLLMProvider(delay time.Duration) *FakeLLMProvider {
 	return &FakeLLMProvider{responseDelay: delay}
 }
 
-func (f *FakeLLMProvider) Generate(ctx context.Context, messages []events.ChatMessage) (string, error) {
+func (f *FakeLLMProvider) Generate(ctx context.Context, messages []ChatMessage) (string, error) {
 	start := time.Now()
 	metrics.Default.IncLLMRequests()
 
@@ -55,7 +54,7 @@ func (f *FakeLLMProvider) Generate(ctx context.Context, messages []events.ChatMe
 	return "I built a production-ready real-time AI assistant backend in Go using Clean Architecture, streaming audio over WebSockets to STT, maintaining 3-level memory in Redis, and auto-summarizing history before generating LLM recommendations.", nil
 }
 
-func (f *FakeLLMProvider) StreamGenerate(ctx context.Context, messages []events.ChatMessage) (<-chan StreamChunk, error) {
+func (f *FakeLLMProvider) StreamGenerate(ctx context.Context, messages []ChatMessage) (<-chan StreamChunk, error) {
 	fullText, err := f.Generate(ctx, messages)
 	if err != nil {
 		return nil, err

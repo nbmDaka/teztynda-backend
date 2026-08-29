@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type RepositoryInterface interface {
+type Store interface {
 	SaveSession(ctx context.Context, s *Session) error
 	GetSession(ctx context.Context, id string) (*Session, error)
 	CloseSession(ctx context.Context, id string) error
@@ -18,10 +18,10 @@ type RepositoryInterface interface {
 }
 
 type Service struct {
-	repo RepositoryInterface
+	repo Store
 }
 
-func NewService(repo RepositoryInterface) *Service {
+func NewService(repo Store) *Service {
 	return &Service{
 		repo: repo,
 	}

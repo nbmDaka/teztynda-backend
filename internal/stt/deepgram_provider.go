@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
@@ -36,7 +35,7 @@ type DeepgramProvider struct {
 	apiKey         string
 	sessionID      string
 	conn           *websocket.Conn
-	transcriptChan chan events.TranscriptEvent
+	transcriptChan chan TranscriptEvent
 	seq            atomic.Int64
 	mu             sync.Mutex
 	ctx            context.Context
@@ -49,7 +48,7 @@ type DeepgramProvider struct {
 func NewDeepgramProvider(apiKey string) *DeepgramProvider {
 	return &DeepgramProvider{
 		apiKey:         apiKey,
-		transcriptChan: make(chan events.TranscriptEvent, 100),
+		transcriptChan: make(chan TranscriptEvent, 100),
 	}
 }
 
@@ -109,7 +108,7 @@ func (d *DeepgramProvider) readLoop() {
 				transcript := resp.Channel.Alternatives[0].Transcript
 				if transcript != "" {
 					isFinal := resp.IsFinal || resp.SpeechFinal
-					event := events.TranscriptEvent{
+					event := TranscriptEvent{
 						Sequence:  d.seq.Add(1),
 						SessionID: d.sessionID,
 						Text:      transcript,
@@ -159,7 +158,7 @@ func (d *DeepgramProvider) SendAudio(ctx context.Context, chunk []byte) error {
 	return nil
 }
 
-func (d *DeepgramProvider) TranscriptEvents() <-chan events.TranscriptEvent {
+func (d *DeepgramProvider) TranscriptEvents() <-chan TranscriptEvent {
 	return d.transcriptChan
 }
 

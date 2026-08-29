@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -36,7 +37,7 @@ func (w *SummarizationWorker) Run(ctx context.Context) {
 				continue
 			}
 
-			task, err := w.redisClient.PopSummarizationTask(ctx, 2*time.Second)
+			data, err := w.redisClient.BRPop(ctx, 2*time.Second, memory.QueueSummarization)
 			if err != nil {
 				if ctx.Err() == nil {
 					slog.Error("Failed to pop task from Redis summarization queue", "error", err)
@@ -44,8 +45,14 @@ func (w *SummarizationWorker) Run(ctx context.Context) {
 				continue
 			}
 
-			if task == nil {
+			if len(data) == 0 {
 				continue // timeout, queue empty
+			}
+
+			var task memory.SummarizationTask
+			if err := json.Unmarshal(data, &task); err != nil {
+				slog.Error("Failed to unmarshal summarization task", "error", err)
+				continue
 			}
 
 			slog.Info("Processing summarization task from queue",

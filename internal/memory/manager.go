@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/internal/llm"
 	"github.com/nbmDaka/teztynda-backend/internal/storage"
 )
 
@@ -189,12 +189,15 @@ func (m *Manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 	// Check if token limit exceeded to enqueue asynchronous background task
 	if sCtx.TotalTokens >= m.maxContextTokens {
 		if m.redisClient != nil {
-			task := events.SummarizationTask{
+			task := SummarizationTask{
 				SessionID:      sessionID,
 				SummaryVersion: sCtx.SummaryVersion,
 				TriggeredAt:    time.Now().UTC(),
 			}
-			if err := m.redisClient.PushSummarizationTask(ctx, task); err != nil {
+			taskBytes, err := json.Marshal(task)
+			if err != nil {
+				slog.Error("Failed to marshal summarization task", "session_id", sessionID, "error", err)
+			} else if err := m.redisClient.LPush(ctx, QueueSummarization, taskBytes); err != nil {
 				slog.Error("Failed to enqueue summarization task to Redis queue", "session_id", sessionID, "error", err)
 			} else {
 				slog.Info("Summarization job enqueued to Redis background queue", "session_id", sessionID, "tokens", sCtx.TotalTokens)
@@ -209,6 +212,17 @@ func (m *Manager) AddMessage(ctx context.Context, sessionID string, msg Message)
 	}
 
 	return nil
+}
+
+// DeleteSession evicts in-memory buffer and local cache for the specified session (Fix 2)
+func (m *Manager) DeleteSession(sessionID string) {
+	m.turnMu.Lock()
+	delete(m.turnBuffer, sessionID)
+	m.turnMu.Unlock()
+
+	m.localMu.Lock()
+	delete(m.localStore, sessionID)
+	m.localMu.Unlock()
 }
 
 func (m *Manager) CreateSummary(ctx context.Context, sessionID string) error {
@@ -311,7 +325,7 @@ func (m *Manager) CreateSummary(ctx context.Context, sessionID string) error {
 	return m.SaveContext(ctx, freshCtx)
 }
 
-func (m *Manager) BuildChatMessages(sCtx *SessionContext, instruction string) []events.ChatMessage {
+func (m *Manager) BuildChatMessages(sCtx *SessionContext, instruction string) []llm.ChatMessage {
 	return sCtx.BuildChatMessages(instruction)
 }
 

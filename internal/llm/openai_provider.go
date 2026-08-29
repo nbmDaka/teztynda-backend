@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
@@ -22,10 +21,10 @@ type OpenAIProvider struct {
 }
 
 type openAIChatRequest struct {
-	Model       string               `json:"model"`
-	Messages    []events.ChatMessage `json:"messages"`
-	Temperature float32              `json:"temperature"`
-	Stream      bool                 `json:"stream,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Temperature float32       `json:"temperature"`
+	Stream      bool          `json:"stream,omitempty"`
 }
 
 type openAIChatResponse struct {
@@ -62,7 +61,7 @@ func NewOpenAIProvider(apiKey, model string) *OpenAIProvider {
 	}
 }
 
-func (o *OpenAIProvider) Generate(ctx context.Context, messages []events.ChatMessage) (string, error) {
+func (o *OpenAIProvider) Generate(ctx context.Context, messages []ChatMessage) (string, error) {
 	start := time.Now()
 	metrics.Default.IncLLMRequests()
 
@@ -126,7 +125,7 @@ func (o *OpenAIProvider) Generate(ctx context.Context, messages []events.ChatMes
 	return chatResp.Choices[0].Message.Content, nil
 }
 
-func (o *OpenAIProvider) StreamGenerate(ctx context.Context, messages []events.ChatMessage) (<-chan StreamChunk, error) {
+func (o *OpenAIProvider) StreamGenerate(ctx context.Context, messages []ChatMessage) (<-chan StreamChunk, error) {
 	start := time.Now()
 	metrics.Default.IncLLMRequests()
 

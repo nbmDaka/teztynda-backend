@@ -2,17 +2,11 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
-)
-
-const (
-	QueueSummarization = "queue:summarization"
 )
 
 type RedisClient struct {
@@ -70,42 +64,33 @@ func (r *RedisClient) ReleaseLock(ctx context.Context, key string) error {
 	return nil
 }
 
-// PushSummarizationTask enqueues a background summarization job into Redis list
-func (r *RedisClient) PushSummarizationTask(ctx context.Context, task events.SummarizationTask) error {
+// LPush pushes raw bytes into a Redis list
+func (r *RedisClient) LPush(ctx context.Context, key string, data []byte) error {
 	if r.client == nil {
 		return fmt.Errorf("redis client is not initialized")
 	}
-	data, err := json.Marshal(task)
-	if err != nil {
-		return fmt.Errorf("marshal summarization task: %w", err)
-	}
-	if err := r.client.LPush(ctx, QueueSummarization, data).Err(); err != nil {
-		return fmt.Errorf("push summarization task to redis: %w", err)
+	if err := r.client.LPush(ctx, key, data).Err(); err != nil {
+		return fmt.Errorf("lpush to redis key %s: %w", key, err)
 	}
 	return nil
 }
 
-// PopSummarizationTask blocks and pops a summarization job from the Redis queue with a timeout
-func (r *RedisClient) PopSummarizationTask(ctx context.Context, timeout time.Duration) (*events.SummarizationTask, error) {
+// BRPop blocks and pops raw bytes from a Redis list with a timeout
+func (r *RedisClient) BRPop(ctx context.Context, timeout time.Duration, key string) ([]byte, error) {
 	if r.client == nil {
 		return nil, fmt.Errorf("redis client is not initialized")
 	}
-	res, err := r.client.BRPop(ctx, timeout, QueueSummarization).Result()
+	res, err := r.client.BRPop(ctx, timeout, key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil // timeout, queue empty
 		}
-		return nil, fmt.Errorf("pop summarization task from redis: %w", err)
+		return nil, fmt.Errorf("brpop from redis key %s: %w", key, err)
 	}
 
 	if len(res) < 2 {
 		return nil, nil
 	}
 
-	var task events.SummarizationTask
-	if err := json.Unmarshal([]byte(res[1]), &task); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal summarization task: %w", err)
-	}
-
-	return &task, nil
+	return []byte(res[1]), nil
 }

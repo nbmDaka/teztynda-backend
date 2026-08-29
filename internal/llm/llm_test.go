@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +18,7 @@ func TestFakeLLMProvider_GenerateAndStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	messages := []events.ChatMessage{
+	messages := []llm.ChatMessage{
 		{Role: "user", Content: "How do you approach scaling WebSockets to 10000 connections?"},
 	}
 

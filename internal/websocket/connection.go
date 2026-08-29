@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/internal/llm"
 	"github.com/nbmDaka/teztynda-backend/internal/memory"
 	"github.com/nbmDaka/teztynda-backend/internal/session"
@@ -85,7 +84,7 @@ func (c *Connection) Start() {
 	metrics.Default.IncActiveConnections()
 
 	// Send initial session started notification
-	c.sendMessage(events.NewSessionStartedMessage(c.sessionID))
+	c.sendMessage(NewSessionStartedMessage(c.sessionID))
 
 	c.wg.Add(4)
 	go c.readPump()
@@ -97,7 +96,7 @@ func (c *Connection) Start() {
 	c.cleanup()
 }
 
-func (c *Connection) sendMessage(msg events.OutboundMessage) {
+func (c *Connection) sendMessage(msg OutboundMessage) {
 	select {
 	case <-c.ctx.Done():
 		return
@@ -182,7 +181,7 @@ func (c *Connection) transcriptPump() {
 			}
 
 			// Broadcast transcript event to client (both partial and final)
-			c.sendMessage(events.NewTranscriptMessage(c.sessionID, event.Text, event.IsFinal, event.Sequence, event.CreatedAt))
+			c.sendMessage(NewTranscriptMessage(c.sessionID, event.Text, event.IsFinal, event.Sequence, event.CreatedAt))
 
 			if event.IsFinal && event.Text != "" {
 				// Commit to Level 2 Short Memory in Memory Manager
@@ -190,8 +189,10 @@ func (c *Connection) transcriptPump() {
 					slog.Error("Failed to add transcript to memory", "session_id", c.sessionID, "error", err)
 				}
 
-				// Asynchronous persistence to PostgreSQL
+				// Fix 1: Tracked asynchronous persistence to PostgreSQL
+				c.wg.Add(1)
 				go func(txt string) {
+					defer c.wg.Done()
 					bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer bgCancel()
 					if err := c.sessionService.RecordTranscript(bgCtx, c.sessionID, "interviewer", txt, true); err != nil {
@@ -214,6 +215,9 @@ func (c *Connection) cleanup() {
 		metrics.Default.DecActiveConnections()
 
 		_ = c.sttProvider.Close()
+
+		// Fix 2: Clean up memory manager buffers/maps to prevent memory leaks
+		c.memoryManager.DeleteSession(c.sessionID)
 
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

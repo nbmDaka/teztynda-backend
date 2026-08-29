@@ -2,8 +2,6 @@ package stt
 
 import (
 	"context"
-
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 )
 
 // STTProvider defines the contract for real-time speech-to-text providers
@@ -15,7 +13,7 @@ type STTProvider interface {
 	SendAudio(ctx context.Context, chunk []byte) error
 
 	// TranscriptEvents returns a read-only channel of transcription events (both partial and final)
-	TranscriptEvents() <-chan events.TranscriptEvent
+	TranscriptEvents() <-chan TranscriptEvent
 
 	// Close terminates the STT streaming session and cleans up resources
 	Close() error

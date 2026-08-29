@@ -1,4 +1,4 @@
-package events
+package websocket
 
 import (
 	"encoding/json"
@@ -40,37 +40,6 @@ type OutboundMessage struct {
 	Error     string      `json:"error,omitempty"`
 	Timestamp int64       `json:"timestamp,omitempty"`
 	Payload   interface{} `json:"payload,omitempty"`
-}
-
-// ChatMessage represents a structured role-based message for LLM interactions
-type ChatMessage struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
-	Content string `json:"content"`
-}
-
-// TranscriptEvent is emitted by the STT provider and passed through the audio pipeline
-type TranscriptEvent struct {
-	Sequence  int64     `json:"sequence"`
-	SessionID string    `json:"session_id"`
-	Text      string    `json:"text"`
-	IsFinal   bool      `json:"is_final"`
-	CreatedAt time.Time `json:"created_at"`
-	Error     error     `json:"-"`
-}
-
-// AnswerGeneratedEvent is emitted when an LLM answer is generated
-type AnswerGeneratedEvent struct {
-	SessionID string    `json:"session_id"`
-	Prompt    string    `json:"prompt"`
-	Response  string    `json:"response"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// SummarizationTask represents a background summarization job queued in Redis
-type SummarizationTask struct {
-	SessionID      string    `json:"session_id"`
-	SummaryVersion int64     `json:"summary_version"`
-	TriggeredAt    time.Time `json:"triggered_at"`
 }
 
 // NewTranscriptMessage creates an OutboundMessage for a transcript event

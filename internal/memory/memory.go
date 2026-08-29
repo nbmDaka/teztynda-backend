@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nbmDaka/teztynda-backend/internal/events"
+	"github.com/nbmDaka/teztynda-backend/internal/llm"
 )
 
 type MessageRole string
@@ -105,12 +105,12 @@ func (sc *SessionContext) FormatShortMemory() string {
 }
 
 // BuildChatMessages constructs role-based ChatMessages for the LLM
-func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMessage {
+func (sc *SessionContext) BuildChatMessages(instruction string) []llm.ChatMessage {
 	if instruction == "" {
 		instruction = "Generate the best possible answer."
 	}
 
-	var chatMessages []events.ChatMessage
+	var chatMessages []llm.ChatMessage
 
 	// 1. System Prompt with Long-term memory
 	var sysContent strings.Builder
@@ -120,7 +120,7 @@ func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMes
 		sysContent.WriteString(sc.LongMemory)
 		sysContent.WriteString("\n")
 	}
-	chatMessages = append(chatMessages, events.ChatMessage{
+	chatMessages = append(chatMessages, llm.ChatMessage{
 		Role:    "system",
 		Content: sysContent.String(),
 	})
@@ -132,7 +132,7 @@ func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMes
 			role = "assistant"
 		}
 		content := fmt.Sprintf("[%s]: %s", formatRole(msg.Role), msg.Content)
-		chatMessages = append(chatMessages, events.ChatMessage{
+		chatMessages = append(chatMessages, llm.ChatMessage{
 			Role:    role,
 			Content: content,
 		})
@@ -144,14 +144,14 @@ func (sc *SessionContext) BuildChatMessages(instruction string) []events.ChatMes
 		if len(speaker) > 0 {
 			speaker = strings.ToUpper(speaker[:1]) + speaker[1:]
 		}
-		chatMessages = append(chatMessages, events.ChatMessage{
+		chatMessages = append(chatMessages, llm.ChatMessage{
 			Role:    "user",
 			Content: fmt.Sprintf("[%s (currently speaking)]: %s", speaker, sc.CurrentTurn.Text),
 		})
 	}
 
 	// 4. Final user prompt
-	chatMessages = append(chatMessages, events.ChatMessage{
+	chatMessages = append(chatMessages, llm.ChatMessage{
 		Role:    "user",
 		Content: instruction,
 	})

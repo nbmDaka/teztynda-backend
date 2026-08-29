@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nbmDaka/teztynda-backend/internal/events"
 	"github.com/nbmDaka/teztynda-backend/pkg/metrics"
 )
 
@@ -22,7 +21,7 @@ var samplePhrases = []string{
 
 type FakeSTTProvider struct {
 	sessionID      string
-	transcriptChan chan events.TranscriptEvent
+	transcriptChan chan TranscriptEvent
 	seq            atomic.Int64
 	chunkCount     int
 	phraseIndex    int
@@ -35,7 +34,7 @@ type FakeSTTProvider struct {
 
 func NewFakeSTTProvider() *FakeSTTProvider {
 	return &FakeSTTProvider{
-		transcriptChan: make(chan events.TranscriptEvent, 100),
+		transcriptChan: make(chan TranscriptEvent, 100),
 	}
 }
 
@@ -87,7 +86,7 @@ func (f *FakeSTTProvider) SendAudio(ctx context.Context, chunk []byte) error {
 	if step < len(words) {
 		partialText := strings.Join(words[:step], " ")
 		select {
-		case f.transcriptChan <- events.TranscriptEvent{
+		case f.transcriptChan <- TranscriptEvent{
 			Sequence:  f.seq.Add(1),
 			SessionID: f.sessionID,
 			Text:      partialText,
@@ -98,7 +97,7 @@ func (f *FakeSTTProvider) SendAudio(ctx context.Context, chunk []byte) error {
 		}
 	} else {
 		select {
-		case f.transcriptChan <- events.TranscriptEvent{
+		case f.transcriptChan <- TranscriptEvent{
 			Sequence:  f.seq.Add(1),
 			SessionID: f.sessionID,
 			Text:      targetPhrase,
@@ -114,7 +113,7 @@ func (f *FakeSTTProvider) SendAudio(ctx context.Context, chunk []byte) error {
 	return nil
 }
 
-func (f *FakeSTTProvider) TranscriptEvents() <-chan events.TranscriptEvent {
+func (f *FakeSTTProvider) TranscriptEvents() <-chan TranscriptEvent {
 	return f.transcriptChan
 }
 
